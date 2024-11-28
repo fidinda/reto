@@ -2,5 +2,11 @@
 name = "reto"
 version = "0.1.0"
 edition = "2021"
+authors = ["Sergiy Protsiv <sergiy@protsiv.net>"]
+description = "An implementation of the Named Data Networking protocol"
+readme = "README.md"
+repository = "https://github.com/fidinda/reto"
+license = "MIT OR Apache-2.0"
+keywords = ["networking"]
 
 [dependencies]
