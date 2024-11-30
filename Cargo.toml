@@ -9,4 +9,19 @@ repository = "https://github.com/fidinda/reto"
 license = "MIT OR Apache-2.0"
 keywords = ["networking"]
 
+
+[lib]
+name = "reto"
+
+[[example]]
+name = "smol_test"
+
+
 [dependencies]
+futures-lite = "2.3.0" # Only used for the control stream now
+
+
+[dev-dependencies]
+smol = "2"
+async-channel = "2"
+sha2 = "0.10"
