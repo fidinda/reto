@@ -26,7 +26,7 @@ impl ContentStore for DummyCS {
 
      fn get<'a, 'b>(
           &'b self, _name: Name<'a>, _can_be_prefix: bool, _freshness_requirement: Option<Timestamp>
-     ) -> impl futures_lite::Future<Output = Result<Option<&'b [u8]>, Self::Error>> {
+     ) -> impl futures_util::Future<Output = Result<Option<&'b [u8]>, Self::Error>> {
           async {
                Ok(None)
           }
@@ -57,7 +57,7 @@ struct SmolPlatform {
 impl Platform for SmolPlatform {
     type Task<T> = smol::Task<T>;
 
-    fn spawn<T>(&self, future: impl futures_lite::Future<Output = T> + 'static) -> Self::Task<T> where T: 'static {
+    fn spawn<T>(&self, future: impl futures_util::Future<Output = T> + 'static) -> Self::Task<T> where T: 'static {
         self.inner.spawn(future)
     }
     
@@ -78,7 +78,7 @@ enum DummyMSG {
 }
 
 impl ControlMessage for DummyMSG {
-     fn apply_to_forwarder<CS, P>(self, forwarder: &mut Forwarder<CS, P>)
+     fn apply_to_forwarder<CS, P, const MAX_PACKET_SIZE: usize, const MAX_FACE_COUNT: usize>(self, forwarder: &mut Forwarder<CS, P, MAX_PACKET_SIZE, MAX_FACE_COUNT>)
      where CS : ContentStore, P : Platform {
           println!("APPLY APPLY");
           match self {
@@ -168,7 +168,7 @@ fn main() {
 
      let executor = Rc::clone(&platform.inner);
 
-     block_on(executor.run(Forwarder::run(cs, control_receiver, platform)));
+     block_on(executor.run(Forwarder::<_,_,8192,256>::run(cs, control_receiver, platform)));
 
      println!("After block on");
 }

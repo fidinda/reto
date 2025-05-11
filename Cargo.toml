@@ -18,7 +18,7 @@ name = "smol_test"
 
 
 [dependencies]
-futures-lite = "2.3.0" # Only used for the control stream now
+futures-util = "0.3.31" # Only used for the control stream now
 
 
 [dev-dependencies]

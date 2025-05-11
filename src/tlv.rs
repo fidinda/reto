@@ -1,6 +1,5 @@
-use core::num::NonZeroU32;
 use crate::encode::{Buffer, Encodable, EncodingError};
-
+use core::num::NonZeroU32;
 
 pub enum DecodingError {
     BufferTooShort,
@@ -9,11 +8,10 @@ pub enum DecodingError {
     LengthInvalid,
 }
 
-
 #[derive(Copy, Clone)]
 pub struct TLV<'a> {
     pub typ: NonZeroU32,
-    pub val: &'a [u8]
+    pub val: &'a [u8],
 }
 
 impl<'a> TLV<'a> {
@@ -24,25 +22,16 @@ impl<'a> TLV<'a> {
         typ < 32 || typ & 1 == 1
     }
 
-    pub fn value_as_unsigned(&self) -> Option<u64> {
+    pub fn as_u64(&self) -> Option<u64> {
         match self.val.len() {
-            1 => {
-                Some(self.val[0] as u64)
-            },
-            2 => {
-                Some(u16::from_be_bytes(self.val.try_into().ok()?) as u64)
-            },
-            4 => {
-                Some(u32::from_be_bytes(self.val.try_into().ok()?) as u64)
-            },
-            8 => {
-                Some(u64::from_be_bytes(self.val.try_into().ok()?))
-            },
-            _ => None
+            1 => Some(self.val[0] as u64),
+            2 => Some(u16::from_be_bytes(self.val.try_into().ok()?) as u64),
+            4 => Some(u32::from_be_bytes(self.val.try_into().ok()?) as u64),
+            8 => Some(u64::from_be_bytes(self.val.try_into().ok()?)),
+            _ => None,
         }
     }
 }
-
 
 impl Encodable for u64 {
     fn encoded_length(&self) -> usize {
@@ -57,7 +46,7 @@ impl Encodable for u64 {
         }
     }
 
-    fn encode<B : Buffer>(&self, buffer: &mut B) -> Result<(), EncodingError> {
+    fn encode<B: Buffer>(&self, buffer: &mut B) -> Result<(), EncodingError> {
         if *self <= 252 {
             buffer.push(&[*self as u8])
         } else if *self <= 65535 {
@@ -73,22 +62,20 @@ impl Encodable for u64 {
     }
 }
 
-
-
 pub struct TLVEntry<'a> {
     pub tlv: TLV<'a>,
-    pub byte_range: (usize, usize)
+    pub byte_range: (usize, usize),
 }
 
-
-pub fn parse_tlvs<'a>(bytes: &'a [u8]) -> impl Iterator<Item = Result<TLVEntry<'a>, DecodingError>> {
+pub fn parse_tlvs<'a>(
+    bytes: &'a [u8],
+) -> impl Iterator<Item = Result<TLVEntry<'a>, DecodingError>> {
     TLVParser { bytes, cursor: 0 }
 }
 
-
 struct TLVParser<'a> {
     bytes: &'a [u8],
-    cursor: usize
+    cursor: usize,
 }
 
 impl<'a> Iterator for TLVParser<'a> {
@@ -97,24 +84,32 @@ impl<'a> Iterator for TLVParser<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         match self.bytes.len() - self.cursor {
             0 => None,
-            _ => Some(self.parse_next())
+            _ => Some(self.parse_next()),
         }
     }
 }
 
-
 impl<'a> TLVParser<'a> {
     fn parse_next(&mut self) -> Result<TLVEntry<'a>, DecodingError> {
         let offset = self.cursor;
-        let typ : u32 = self.parse_varint()?.try_into().map_err(|_| DecodingError::TypeInvalid)?;
+        let typ: u32 = self
+            .parse_varint()?
+            .try_into()
+            .map_err(|_| DecodingError::TypeInvalid)?;
         let typ = NonZeroU32::new(typ).ok_or(DecodingError::TypeInvalid)?;
-        let len : usize = self.parse_varint()?.try_into().map_err(|_| DecodingError::LengthInvalid)?;
+        let len: usize = self
+            .parse_varint()?
+            .try_into()
+            .map_err(|_| DecodingError::LengthInvalid)?;
         if self.cursor + len > self.bytes.len() {
             return Err(DecodingError::BufferTooShort);
         }
-        let val = &self.bytes[self.cursor..(self.cursor+len)];
         self.cursor += len;
-        Ok(TLVEntry { tlv: TLV { typ, val }, byte_range: (offset, self.cursor) })
+        let val = &self.bytes[offset..self.cursor];
+        Ok(TLVEntry {
+            tlv: TLV { typ, val },
+            byte_range: (offset, self.cursor),
+        })
     }
 
     fn parse_varint(&mut self) -> Result<u64, DecodingError> {
@@ -124,43 +119,49 @@ impl<'a> TLVParser<'a> {
             0..=252 => Ok(first as u64),
             253 => {
                 if self.cursor + 2 >= self.bytes.len() {
-                    return Err(DecodingError::BufferTooShort)
+                    return Err(DecodingError::BufferTooShort);
                 }
-                let next : [u8;2] = self.bytes[self.cursor..(self.cursor + 2)].try_into().unwrap();
+                let next: [u8; 2] = self.bytes[self.cursor..(self.cursor + 2)]
+                    .try_into()
+                    .unwrap();
                 self.cursor += 2;
-                let val = u16::from_be_bytes(next); 
+                let val = u16::from_be_bytes(next);
                 if val > 252 {
                     Ok(val as u64)
                 } else {
                     Err(DecodingError::NonMinimalIntegerEncoding)
                 }
-            },
+            }
             254 => {
                 if self.cursor + 4 >= self.bytes.len() {
-                    return Err(DecodingError::BufferTooShort)
+                    return Err(DecodingError::BufferTooShort);
                 }
-                let next : [u8;4] = self.bytes[self.cursor..(self.cursor + 4)].try_into().unwrap();
+                let next: [u8; 4] = self.bytes[self.cursor..(self.cursor + 4)]
+                    .try_into()
+                    .unwrap();
                 self.cursor += 4;
-                let val = u32::from_be_bytes(next); 
+                let val = u32::from_be_bytes(next);
                 if val > 65535 {
                     Ok(val as u64)
                 } else {
                     Err(DecodingError::NonMinimalIntegerEncoding)
                 }
-            },
+            }
             255 => {
                 if self.cursor + 8 >= self.bytes.len() {
-                    return Err(DecodingError::BufferTooShort)
+                    return Err(DecodingError::BufferTooShort);
                 }
-                let next : [u8;8] = self.bytes[self.cursor..(self.cursor + 8)].try_into().unwrap();
+                let next: [u8; 8] = self.bytes[self.cursor..(self.cursor + 8)]
+                    .try_into()
+                    .unwrap();
                 self.cursor += 8;
-                let val = u64::from_be_bytes(next); 
+                let val = u64::from_be_bytes(next);
                 if val > 4294967295 {
                     Ok(val)
                 } else {
                     Err(DecodingError::NonMinimalIntegerEncoding)
                 }
-            },
+            }
         }
     }
 }
@@ -168,20 +169,15 @@ impl<'a> TLVParser<'a> {
 impl<'a> Encodable for TLV<'a> {
     fn encoded_length(&self) -> usize {
         let l = self.val.len();
-        (self.typ.get() as u64).encoded_length()
-        + (l as u64).encoded_length()
-        + l
+        (self.typ.get() as u64).encoded_length() + (l as u64).encoded_length() + l
     }
 
-    fn encode<B : crate::encode::Buffer>(&self, buffer: &mut B) -> Result<(), EncodingError> {
+    fn encode<B: crate::encode::Buffer>(&self, buffer: &mut B) -> Result<(), EncodingError> {
         (self.typ.get() as u64).encode(buffer)?;
         (self.val.len() as u64).encode(buffer)?;
         buffer.push(&self.val)
     }
 }
-
-
-
 
 /*impl<'a, 'b, T> Encodable for T where &'b T : Into<TLV<'a>>, T: 'b {
     fn encoded_length(&self) -> usize {
@@ -199,7 +195,6 @@ impl<'a> Encodable for TLV<'a> {
         buffer.push(&tlv.val)
     }
 }*/
-
 
 #[cfg(test)]
 mod tests {

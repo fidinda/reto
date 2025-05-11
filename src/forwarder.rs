@@ -1,55 +1,58 @@
-use alloc::{boxed::Box, rc::Rc, vec::Vec};
-use futures_lite::{Stream, StreamExt};
+use crate::encode::{Encodable, SliceBuffer};
+use crate::tables::{PrefixRegistrationResult, Tables};
+use crate::{
+    parse_packet, ContentStore, Data, FaceError, FaceReceiver, FaceSender, Hasher, Interest, Name,
+    PacketParseResult, Platform,
+};
+use alloc::{boxed::Box, rc::Rc};
 use core::cell::RefCell;
 use core::future::Future;
-use crate::{parse_packet, ContentStore, Data, FaceError, FaceReceiver, FaceSender, Hasher, Interest, Name, PacketParseResult, Platform};
-use crate::tables::{PrefixRegistrationResult, Tables};
-use crate::encode::Encodable;
+use futures_util::{Stream, StreamExt};
 
 pub trait ControlMessage {
-    fn apply_to_forwarder<CS, P>(self, forwarder: &mut Forwarder<CS, P>)
-    where CS : ContentStore, P : Platform;
+    fn apply_to_forwarder<CS, P, const MAX_PACKET_SIZE: usize, const MAX_FACE_COUNT: usize>(
+        self,
+        forwarder: &mut Forwarder<CS, P, MAX_PACKET_SIZE, MAX_FACE_COUNT>,
+    ) where
+        CS: ContentStore,
+        P: Platform;
 }
-
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FaceHandle(pub(crate) u32);
 
-
-pub struct Forwarder<CS, P>
-where 
-CS : ContentStore + 'static,
-P : Platform + 'static {
+pub struct Forwarder<CS, P, const MAX_PACKET_SIZE: usize = 8192, const MAX_FACE_COUNT: usize = 256>
+where
+    CS: ContentStore + 'static,
+    P: Platform + 'static,
+{
     platform: P,
-    faces: Rc<RefCell<Faces<P>>>,
+    faces: Rc<RefCell<Faces<P, MAX_FACE_COUNT>>>,
     cs: Rc<CS>,
-    tables: Rc<RefCell<Tables>>
+    tables: Rc<RefCell<Tables>>,
 }
 
-impl<CS, P> Forwarder<CS, P> 
-where 
-CS : ContentStore + 'static,
-P : Platform + 'static {
-    
-    pub async fn run<M, CR>(
-        cs: CS,
-        control_receiver: CR,
-        platform: P,
-    ) where 
-    M: ControlMessage,
-    CR : Stream<Item = M> 
+impl<CS, P, const MAX_PACKET_SIZE: usize, const MAX_FACE_COUNT: usize>
+    Forwarder<CS, P, MAX_PACKET_SIZE, MAX_FACE_COUNT>
+where
+    CS: ContentStore + 'static,
+    P: Platform + 'static,
+{
+    pub async fn run<M, CR>(cs: CS, control_receiver: CR, platform: P)
+    where
+        M: ControlMessage,
+        CR: Stream<Item = M>,
     {
         let mut control_receiver = Box::pin(control_receiver);
 
         let cs = Rc::new(cs);
         let tables = Rc::new(RefCell::new(Tables::new()));
-        
-        let faces = Faces { handles: Default::default(), next_id: 0 };
-        let faces = Rc::new(RefCell::new( faces ));
 
-        let mut forwarder = Self { 
-            platform, 
-            faces, 
+        let faces = Rc::new(RefCell::new(Faces::new()));
+
+        let mut forwarder = Self {
+            platform,
+            faces,
             tables,
             cs,
         };
@@ -57,165 +60,183 @@ P : Platform + 'static {
         loop {
             match control_receiver.next().await {
                 Some(m) => m.apply_to_forwarder(&mut forwarder),
-                None => break // The control channel is dropped, so we stop the forwarder
+                None => break, // The control channel is dropped, so we stop the forwarder
             }
         }
     }
-    
-    pub fn add_face<FS, FR>(&mut self, sender: FS, receiver: FR) -> FaceHandle
-    where FS: FaceSender + 'static, FR: FaceReceiver + 'static {
+
+    pub fn add_face<FS, FR>(&mut self, sender: FS, receiver: FR) -> Option<FaceHandle>
+    where
+        FS: FaceSender + 'static,
+        FR: FaceReceiver + 'static,
+    {
         let faces = Rc::clone(&self.faces);
         let face = faces.as_ref().borrow_mut().next_handle();
-        
+
         let cs = Rc::clone(&self.cs);
         let tables = Rc::clone(&self.tables);
 
         let task = self.platform.spawn(async move {
             let mut receiver = receiver;
-            let mut interest_buffer = Vec::new();
+            let mut interest_buffer = [0u8; MAX_PACKET_SIZE];
             loop {
                 match receiver.recv().await {
-                    Ok(packet) => {
-                        match parse_packet(packet) {
-                            Some(PacketParseResult::Interest(interest)) => {
-                                Self::handle_interest(
-                                    interest,
-                                    packet, 
-                                    face, 
-                                    &faces, 
-                                    &tables, 
-                                    &cs,
-                                    &mut interest_buffer
-                                ).await
-                            },
-                            Some(PacketParseResult::Data(data)) => {
-                                Self::handle_data(
-                                    data,
-                                    packet, 
-                                    face, 
-                                    &faces, 
-                                    &tables, 
-                                    &cs
-                                ).await
-                            },
-                            _ => {}
+                    Ok(packet) => match parse_packet(packet) {
+                        Some(PacketParseResult::Interest(interest)) => {
+                            Self::handle_interest(
+                                interest,
+                                packet,
+                                face,
+                                &faces,
+                                &tables,
+                                &cs,
+                                &mut interest_buffer,
+                            )
+                            .await
                         }
+                        Some(PacketParseResult::Data(data)) => {
+                            Self::handle_data(data, packet, face, &faces, &tables, &cs).await
+                        }
+                        _ => {}
                     },
                     Err(FaceError::Disconnected) => {
                         Self::remove_face_inner(face, &faces, &tables);
-                        break
-                    },
+                        break;
+                    }
                 };
             }
         });
-        
-        self.faces.as_ref().borrow_mut().add_face(face, task, sender);
 
-        face
+        self.faces
+            .as_ref()
+            .borrow_mut()
+            .add_face(face, task, sender)
     }
 
     pub fn remove_face(&mut self, face: FaceHandle) {
         Self::remove_face_inner(face, &self.faces, &self.tables)
     }
 
-    fn remove_face_inner(face: FaceHandle, faces: &Rc<RefCell<Faces<P>>>, tables: &Rc<RefCell<Tables>>) {
+    fn remove_face_inner(
+        face: FaceHandle,
+        faces: &Rc<RefCell<Faces<P, MAX_FACE_COUNT>>>,
+        tables: &Rc<RefCell<Tables>>,
+    ) {
         tables.as_ref().borrow_mut().unregister_face(face);
         faces.as_ref().borrow_mut().remove_face(face);
     }
 
-
-
-    pub fn register_name_prefix_for_forwarding<'a>(&mut self, name_prefix: Name<'a>, forward_to: FaceHandle) {
-        self.tables.as_ref().borrow_mut().register_prefix(name_prefix, forward_to)
+    pub fn register_name_prefix_for_forwarding<'a>(
+        &mut self,
+        name_prefix: Name<'a>,
+        forward_to: FaceHandle,
+    ) {
+        self.tables
+            .as_ref()
+            .borrow_mut()
+            .register_prefix(name_prefix, forward_to)
     }
 
-    pub fn unregister_name_prefix_for_forwarding<'a>(&mut self, name_prefix: Name<'a>, forward_to: FaceHandle) -> bool {
-        self.tables.as_ref().borrow_mut().unregister_prefix(name_prefix, forward_to)
+    pub fn unregister_name_prefix_for_forwarding<'a>(
+        &mut self,
+        name_prefix: Name<'a>,
+        forward_to: FaceHandle,
+    ) -> bool {
+        self.tables
+            .as_ref()
+            .borrow_mut()
+            .unregister_prefix(name_prefix, forward_to)
     }
 
-
-
-    async fn send_to(face: FaceHandle, packet: &[u8], faces: &Rc<RefCell<Faces<P>>>, tables: &Rc<RefCell<Tables>>) {
+    async fn send_to(
+        face: FaceHandle,
+        packet: &[u8],
+        faces: &Rc<RefCell<Faces<P, MAX_FACE_COUNT>>>,
+        tables: &Rc<RefCell<Tables>>,
+    ) {
         match faces.as_ref().borrow_mut().send_to(face, &packet).await {
-            Ok(_) => {},
-            Err(FaceError::Disconnected) =>  Self::remove_face_inner(face, &faces, &tables),
+            Ok(_) => {}
+            Err(FaceError::Disconnected) => Self::remove_face_inner(face, &faces, &tables),
         }
     }
 
     async fn handle_interest<'a>(
-        mut interest: Interest<'a>, 
+        mut interest: Interest<'a>,
         original_packet: &'a [u8],
-        origin: FaceHandle, 
-        faces: &'a Rc<RefCell<Faces<P>>>, 
+        origin: FaceHandle,
+        faces: &'a Rc<RefCell<Faces<P, MAX_FACE_COUNT>>>,
         tables: &'a Rc<RefCell<Tables>>,
         cs: &'a Rc<CS>,
-        interest_buffer: &mut Vec<u8>,
+        interest_buffer: &mut [u8],
     ) {
         // Interest must have a non-empty name
-        if interest.name.component_count() == 0 { return };
+        if interest.name.component_count() == 0 {
+            return;
+        };
 
         // TODO: since this is the only thing we change in an interest
-        //  it would be great to be able to write out the original 
+        //  it would be great to be able to write out the original
         //  interest with only this byte changed.
         let mut interest_modified = false;
 
         // We want to drop packets if they have hop limit of 0,
-        //  otherwise we want to decrement it. If the resulting 
-        //  hop limit is 0 we will only try to satisfy this from 
+        //  otherwise we want to decrement it. If the resulting
+        //  hop limit is 0 we will only try to satisfy this from
         //  the content store, but not forward.
         // If no hop limit is present we always accept the interest.
         let is_last_hop = match &mut interest.hop_limit {
-            Some(hop) => if *hop == 0 { 
-                return 
-            } else { 
-                interest_modified = true;
-                *hop -= 1;
-                *hop == 0
-            },
-            None => false
+            Some(hop) => {
+                if *hop == 0 {
+                    return;
+                } else {
+                    interest_modified = true;
+                    *hop -= 1;
+                    *hop == 0
+                }
+            }
+            None => false,
         };
 
         // We check the PIT before CS because it is smaller/faster
-        //  and if the interest is already there then we know we 
+        //  and if the interest is already there then we know we
         //  could not have satisfied it from CS.
 
         let now = P::now();
-            
+
         if !is_last_hop {
             let deadline = match interest.interest_lifetime {
                 Some(ms) => now.adding(ms),
                 None => now.adding(DEFAULT_DEADLINE_INCREMENT_MS),
-            }; 
+            };
 
-            match tables.as_ref().borrow_mut()
-            .register_interest(
-                interest.name, 
+            match tables.as_ref().borrow_mut().register_interest(
+                interest.name,
                 interest.can_be_prefix,
-                origin, 
-                now, 
+                origin,
+                now,
                 RETRANSMISSION_PERIOD_MS,
-                deadline, 
-                interest.nonce
+                deadline,
+                interest.nonce,
             ) {
                 PrefixRegistrationResult::NewRegistration => {
                     // This is the first time (in recent past) that we see this packet, forward through
-                },
+                }
                 PrefixRegistrationResult::PreviousFromSelf => {
                     // We treat this as a retransmission and always send the packet forward
-                },
+                }
                 PrefixRegistrationResult::PreviousFromOthers(should_retransmit) => {
                     // The PIT already has others applying, so we only forward if it was not too long ago
                     if !should_retransmit {
-                        return
+                        return;
                     }
-                },
+                }
                 PrefixRegistrationResult::DeadNonce => {
                     // The interest likely looped, so we drop it
-                    return
-                },
+                    return;
+                }
                 PrefixRegistrationResult::InvalidName => {
                     // The interest has an invalid name, so we drop it
-                    return
+                    return;
                 }
             }
         }
@@ -225,10 +246,13 @@ P : Platform + 'static {
             Some(now)
         } else {
             None
-        }; 
+        };
 
-        if let Ok(Some(retrieved)) = cs.as_ref()
-        .get(interest.name, interest.can_be_prefix, freshness_requirement).await {
+        if let Ok(Some(retrieved)) = cs
+            .as_ref()
+            .get(interest.name, interest.can_be_prefix, freshness_requirement)
+            .await
+        {
             // The packet is found so we simply reply to the same face
             Self::send_to(origin, retrieved, &faces, &tables).await;
             return;
@@ -244,13 +268,16 @@ P : Platform + 'static {
             }
 
             // If the interest has been modified we need to encode it
+            let mut slice_buffer = SliceBuffer {
+                slice: interest_buffer,
+                cursor: 0,
+            };
             let encoded_interest = if interest_modified {
-                interest_buffer.clear();
-                match interest.encode(interest_buffer) {
-                    Ok(_) => {},
-                    Err(_) => return
+                match interest.encode(&mut slice_buffer) {
+                    Ok(_) => {}
+                    Err(_) => return,
                 }
-                &interest_buffer
+                &slice_buffer.slice
             } else {
                 original_packet
             };
@@ -267,10 +294,10 @@ P : Platform + 'static {
     }
 
     async fn handle_data<'a>(
-        data: Data<'a>, 
+        data: Data<'a>,
         original_packet: &'a [u8],
-        origin: FaceHandle, 
-        faces: &'a Rc<RefCell<Faces<P>>>, 
+        origin: FaceHandle,
+        faces: &'a Rc<RefCell<Faces<P, MAX_FACE_COUNT>>>,
         tables: &'a Rc<RefCell<Tables>>,
         cs: &'a Rc<CS>,
     ) {
@@ -280,12 +307,18 @@ P : Platform + 'static {
 
         let mut hasher = P::sha256hasher();
         // TODO: test this!!! Probably inside the tlv, not packet?
-        hasher.update(&original_packet[data.signed_range_in_parent_tlv.0..data.signed_range_in_parent_tlv.1]);
+        hasher.update(
+            &original_packet[data.signed_range_in_parent_tlv.0..data.signed_range_in_parent_tlv.1],
+        );
         let digest = hasher.finalize();
 
-        // First we try to find the interest in the PIT and send it to every 
+        // First we try to find the interest in the PIT and send it to every
         //  requesting face other than the face we got it from.
-        for face in tables.as_ref().borrow_mut().satisfy_interests(data.name, digest, now) {
+        for face in tables
+            .as_ref()
+            .borrow_mut()
+            .satisfy_interests(data.name, digest, now)
+        {
             is_unsolicited = false;
             if face != origin {
                 Self::send_to(face, original_packet, &faces, &tables).await
@@ -293,94 +326,133 @@ P : Platform + 'static {
         }
 
         // For security we should usually drop unsolictied,
-        //  but might want to, e.g. keep the onces coming from local faces.    
+        //  but might want to, e.g. keep the onces coming from local faces.
         if is_unsolicited {
-            return
+            return;
         }
 
-        // Then, if there was actually any interest, we want to store 
+        // Then, if there was actually any interest, we want to store
         //  the data to satisfy future requests.
-        
-        // The freshness deadline is the last instant when the data packet will be 
-        //  considered "fresh" for the purposes of responding to "must be fresh" interests. 
+
+        // The freshness deadline is the last instant when the data packet will be
+        //  considered "fresh" for the purposes of responding to "must be fresh" interests.
         // No freshness_period means the freshness period of 0, i.e. immediately non-fresh.
-        let freshness_period = data.meta_info
-        .map(|mi| mi.freshness_period)
-        .flatten()
-        .unwrap_or(0);
+        let freshness_period = data
+            .meta_info
+            .map(|mi| mi.freshness_period)
+            .flatten()
+            .unwrap_or(0);
         let freshness_deadline = now.adding(freshness_period);
 
-        let _ = cs.as_ref().insert(data.name, digest, freshness_deadline, original_packet).await;
+        let _ = cs
+            .as_ref()
+            .insert(data.name, digest, freshness_deadline, original_packet)
+            .await;
     }
-
 }
 
-
-struct Faces<P : Platform + 'static> {
-    handles: Vec<(FaceHandle, <P as Platform>::Task<()>, Box<dyn FaceSenderWrap>)>,
+struct Faces<P: Platform + 'static, const MAX_FACE_COUNT: usize> {
+    handles: [Option<(
+        FaceHandle,
+        <P as Platform>::Task<()>,
+        Box<dyn FaceSenderWrap>,
+    )>; MAX_FACE_COUNT],
+    count: usize,
     next_id: u32,
 }
 
-impl<P : Platform> Faces<P> {
+impl<P: Platform, const MAX_FACE_COUNT: usize> Faces<P, MAX_FACE_COUNT> {
+    fn new() -> Self {
+        Self {
+            handles: [const { None }; MAX_FACE_COUNT],
+            count: 0,
+            next_id: 0,
+        }
+    }
+
     fn next_handle(&mut self) -> FaceHandle {
         let id = self.next_id;
         self.next_id += 1;
         FaceHandle(id)
     }
 
-    fn add_face<FS: FaceSender + 'static>(&mut self, handle: FaceHandle, task: <P as Platform>::Task<()>, sender: FS) {
-        self.handles.push((handle, task, Box::new(FaceSenderWrapper { sender })));
-        self.handles.sort_by(|a, b| a.0.cmp(&b.0));
+    fn add_face<FS: FaceSender + 'static>(
+        &mut self,
+        handle: FaceHandle,
+        task: <P as Platform>::Task<()>,
+        sender: FS,
+    ) -> Option<FaceHandle> {
+        if self.count == MAX_FACE_COUNT {
+            return None;
+        }
+        self.handles[self.count] = Some((handle, task, Box::new(FaceSenderWrapper { sender })));
+        self.count += 1;
+        self.handles[0..self.count]
+            .sort_by(|a, b| a.as_ref().unwrap().0.cmp(&b.as_ref().unwrap().0));
+        Some(handle)
     }
 
     fn remove_face(&mut self, face: FaceHandle) {
         if let Some(idx) = self.index_of_face(face) {
-            let _ = self.handles.remove(idx);
+            // Move all handles back
+            for i in idx..(self.count - 1) {
+                self.handles[i] = self.handles[i + 1].take();
+            }
+            self.count -= 1;
         }
     }
 
     fn index_of_face(&self, face: FaceHandle) -> Option<usize> {
-        if let Ok(idx) = self.handles.binary_search_by(|x| x.0.cmp(&face)) {
-            return Some(idx)
+        if let Ok(idx) =
+            self.handles[0..self.count].binary_search_by(|x| x.as_ref().unwrap().0.cmp(&face))
+        {
+            return Some(idx);
         }
         None
     }
 
     async fn send_to(&mut self, face: FaceHandle, packet: &[u8]) -> Result<(), FaceError> {
         if let Some(idx) = self.index_of_face(face) {
-            return self.handles[idx].2.send(packet).await
+            return self.handles[idx].as_mut().unwrap().2.send(packet).await;
         }
         Err(FaceError::Disconnected)
     }
 }
 
-
-
 use core::pin::Pin;
 trait FaceSenderWrap {
-    fn send<'a>(&'a mut self, bytes: &'a [u8]) -> Pin<Box<dyn Future<Output = Result<(), FaceError>> + 'a>>;
+    fn send<'a>(
+        &'a mut self,
+        bytes: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), FaceError>> + 'a>>;
 }
 
-struct FaceSenderWrapper<FS> where  FS: FaceSender {
+struct FaceSenderWrapper<FS>
+where
+    FS: FaceSender,
+{
     sender: FS,
 }
 
-impl<FS> FaceSenderWrap for FaceSenderWrapper<FS> where  FS: FaceSender {
-    fn send<'a>(&'a mut self, bytes: &'a [u8]) -> Pin<Box<dyn Future<Output = Result<(), FaceError>> + 'a>> {
+impl<FS> FaceSenderWrap for FaceSenderWrapper<FS>
+where
+    FS: FaceSender,
+{
+    fn send<'a>(
+        &'a mut self,
+        bytes: &'a [u8],
+    ) -> Pin<Box<dyn Future<Output = Result<(), FaceError>> + 'a>> {
         Box::pin(self.sender.send(&bytes))
     }
 }
 
-
-const DEFAULT_DEADLINE_INCREMENT_MS : u64 = 4000; // 4 sec
-const RETRANSMISSION_PERIOD_MS : u64 = 1000; // 1 sec
-
+const DEFAULT_DEADLINE_INCREMENT_MS: u64 = 4000; // 4 sec
+const RETRANSMISSION_PERIOD_MS: u64 = 1000; // 1 sec
 
 // It might be possible to implement this without Tasks when the async system matures
 //  (so we do not need the spawn method in the platform and can be executor-agnostic).
 
-
-/* 
+/*
 
 use core::alloc::Layout;
 use core::mem::ManuallyDrop;
@@ -408,7 +480,7 @@ async fn make_future<'a, FR : FaceReceiver + 'a>(rx: &'a FR) -> (Result<&'a [u8]
 impl<'a, FR : FaceReceiver> BroadcastStream<'a, FR> {
     /// Create a new `BroadcastStream`.
     pub fn new(rx: &'a FR) -> Self {
-        Self { 
+        Self {
             inner: ReusableBoxFuture::new(make_future(rx)),
         }
     }
@@ -420,7 +492,7 @@ impl<'a, FR : FaceReceiver> Stream for BroadcastStream<'a, FR> {
         let (result, rx) = core::task::ready!(self.inner.poll(cx));
         self.inner.set(make_future(rx));
         Poll::Ready(Some(result))
-        
+
         /*match result {
             Ok(item) => Poll::Ready(Some(Ok(item))),
             Err(FaceError::Disconnected) => Poll::Ready(None),
@@ -564,7 +636,7 @@ impl<O, F: FnOnce() -> O> Drop for CallOnDrop<O, F> {
     }
 }
 
-/* 
+/*
 // The only method called on self.boxed is poll, which takes &mut self, so this
 // struct being Sync does not permit any invalid access to the Future, even if
 // the future is not Sync.
@@ -580,7 +652,7 @@ impl<T> fmt::Debug for ReusableBoxFuture<'_, T> {
 
 
 
-/* 
+/*
 trait AttachedStream {
     type Item<'s> where Self: 's;
 
@@ -620,7 +692,7 @@ use core::task::{Poll, Context};
 use futures_lite::FutureExt;
 
 
-/* 
+/*
 struct FaceReceiverStream<'a, FR> where FR: FaceReceiver + 'static {
     receiver: Box<FR>,
     phantom_data: core::marker::PhantomData<&'a ()>,
@@ -640,12 +712,12 @@ impl<'a, FR: FaceReceiver + 'static> Stream for FaceReceiverStream<'a, FR> {
             Poll::Ready(v) => Poll::Ready(Some(v)),
             Poll::Pending => Poll::Pending,
         }
-        
+
         /*match fut.poll(cx) {
             Poll::Ready(v) => Poll::Ready(Some(v)),
             Poll::Pending => Poll::Pending,
         }*/
-        
+
         //Pin::new(&mut self.receiver).recv().poll(cx).map(move |x| Some(x))
     }
 }
@@ -659,7 +731,7 @@ impl<'a, FR> From<FR> for FaceReceiverStream<'a, FR> where FR: FaceReceiver + 'a
 
 
 
-/* 
+/*
 use futures_lite::future::block_on;
 trait FaceSenderWrap {
     fn send(&mut self, bytes: &[u8]) -> Result<(), FaceError>;
