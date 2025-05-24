@@ -18,7 +18,7 @@ name = "smol_test"
 
 
 [dependencies]
-futures-util = "0.3.31" # Only used for the control stream now
+futures-util = { version = "0.3", features = ["sink"] } # Only used for the control stream now
 
 
 [dev-dependencies]

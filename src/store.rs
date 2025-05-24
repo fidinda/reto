@@ -21,7 +21,7 @@ pub trait ContentStore {
     type Error;
 
     fn insert<'a, 'b>(
-        &'b self,
+        &'b mut self,
         name: Name<'a>,
         digest: [u8; 32],
         freshness_deadline: Timestamp,

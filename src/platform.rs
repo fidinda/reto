@@ -10,9 +10,7 @@ pub trait Hasher<const N: usize> {
 pub trait Platform {
     // Task spawning (which is currently needed for receiving from multiple faces asynchronously)
     type Task<T>; // Is assumed that the execution of the task is stopped when this is dropped
-    fn spawn<T>(&self, future: impl Future<Output = T> + 'static) -> Self::Task<T>
-    where
-        T: 'static;
+    fn spawn<T: 'static>(&self, future: impl Future<Output = T> + 'static) -> Self::Task<T>;
 
     // Time
     fn now() -> Timestamp;

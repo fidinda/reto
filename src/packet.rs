@@ -35,6 +35,10 @@ impl<'a> Interest<'a> {
         todo!();
         None
     }
+
+    pub(crate) fn index_of_hop_byte(&self) -> Option<usize> {
+        unimplemented!()
+    }
 }
 
 impl<'a> Encodable for Interest<'a> {
@@ -532,27 +536,17 @@ const TLV_TYPE_SIGNATURE_TIME: NonZeroU32 = NonZeroU32::new(40).unwrap();
 const TLV_TYPE_SIGNATURE_SEQ_NUM: NonZeroU32 = NonZeroU32::new(42).unwrap();
 */
 
-pub fn parse_packet(bytes: &[u8]) -> Option<PacketParseResult<'_>> {
-    parse_packets(bytes).next()
-}
 
-pub fn parse_packets(bytes: &[u8]) -> impl Iterator<Item = PacketParseResult<'_>> {
-    parse_tlvs(bytes).map(|entry| {
-        let entry: TLVEntry = match entry {
-            Ok(entry) => entry,
-            Err(e) => return PacketParseResult::TLVDecodingError(e),
-        };
-
-        match entry.tlv.typ.get() {
-            TLV_TYPE_INTEREST => match Interest::from_bytes(entry.tlv.val) {
-                Some(interest) => PacketParseResult::Interest(interest),
-                None => PacketParseResult::PacketDecodingError,
-            },
-            TLV_TYPE_DATA => match Data::from_bytes(entry.tlv.val) {
-                Some(data) => PacketParseResult::Data(data),
-                None => PacketParseResult::PacketDecodingError,
-            },
-            _ => PacketParseResult::UnknownType(entry.tlv.typ),
-        }
-    })
+pub fn parse_packet(tlv: TLV) -> PacketParseResult<'_> {
+    match tlv.typ.get() {
+        TLV_TYPE_INTEREST => match Interest::from_bytes(tlv.val) {
+            Some(interest) => PacketParseResult::Interest(interest),
+            None => PacketParseResult::PacketDecodingError,
+        },
+        TLV_TYPE_DATA => match Data::from_bytes(tlv.val) {
+            Some(data) => PacketParseResult::Data(data),
+            None => PacketParseResult::PacketDecodingError,
+        },
+        _ => PacketParseResult::UnknownType(tlv.typ),
+    }
 }

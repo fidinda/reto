@@ -198,20 +198,20 @@ impl<'a> Encodable for TLV<'a> {
 
 #[cfg(test)]
 mod tests {
-    //use super::*;
+    use crate::encode::Encodable;
 
     #[test]
     fn test_unsigned() {
-        /*for v in 0..252 {
-            assert_eq!(TLV::unsigned_encoded_length(v), 1);
+        for v in 0u64..252 {
+            assert_eq!(v.encoded_length(), 1);
         }
-        assert_eq!(TLV::unsigned_encoded_length(253), 3);
-        assert_eq!(TLV::unsigned_encoded_length(254), 3);
-        assert_eq!(TLV::unsigned_encoded_length(255), 3);
-        assert_eq!(TLV::unsigned_encoded_length(256), 3);
-        assert_eq!(TLV::unsigned_encoded_length(65535), 3);
-        assert_eq!(TLV::unsigned_encoded_length(65536), 5);
-        assert_eq!(TLV::unsigned_encoded_length(4294967295), 5);
-        assert_eq!(TLV::unsigned_encoded_length(4294967296), 9);*/
+        assert_eq!(253u64.encoded_length(), 3);
+        assert_eq!(254u64.encoded_length(), 3);
+        assert_eq!(255u64.encoded_length(), 3);
+        assert_eq!(256u64.encoded_length(), 3);
+        assert_eq!(65535u64.encoded_length(), 3);
+        assert_eq!(65536u64.encoded_length(), 5);
+        assert_eq!(4294967295u64.encoded_length(), 5);
+        assert_eq!(4294967296u64.encoded_length(), 9);
     }
 }

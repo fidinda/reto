@@ -5,6 +5,7 @@ use crate::{FaceError, FaceReceiver, FaceSender};
 // Implements the NDNLPv2 protocol over an underlying
 //  datagram-based face with MTU
 
+/* 
 pub struct DatagramSender<S: FaceSender, const MTU: usize> {
     _sender: S,
     _buf: [u8; MTU],
@@ -27,3 +28,4 @@ impl<R: FaceReceiver, const MTU: usize> FaceReceiver for DatagramReceiver<R, MTU
         async { todo!() }
     }
 }
+*/
