@@ -1,5 +1,3 @@
-use core::future::Future;
-
 use crate::{Name, Timestamp};
 
 // Evict unsolicited first, then stale, then fresh.
@@ -26,12 +24,12 @@ pub trait ContentStore {
         digest: [u8; 32],
         freshness_deadline: Timestamp,
         packet: &'a [u8],
-    ) -> impl Future<Output = Result<(), Self::Error>>;
+    ) -> Result<(), Self::Error>;
 
     fn get<'a, 'b>(
         &'b self,
         name: Name<'a>,
         can_be_prefix: bool,
         freshness_requirement: Option<Timestamp>,
-    ) -> impl Future<Output = Result<Option<&'b [u8]>, Self::Error>>;
+    ) -> Result<Option<&'b [u8]>, Self::Error>;
 }

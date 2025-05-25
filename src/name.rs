@@ -10,20 +10,6 @@ pub struct Name<'a> {
     inner: NameInner<'a>,
 }
 
-#[derive(Copy, Clone)]
-enum NameInner<'a> {
-    Empty,
-    Buffer {
-        component_bytes: &'a [u8],
-        component_count: usize,
-        original_count: usize,
-    },
-    Component {
-        original: &'a Name<'a>,
-        component: NameComponent<'a>,
-    },
-}
-
 impl<'a> Name<'a> {
     pub fn new() -> Self {
         Self {
@@ -253,6 +239,21 @@ impl<'a> Encodable for Name<'a> {
         (component_len as u64).encode(buffer)?;
         self.component_encode(buffer)
     }
+}
+
+
+#[derive(Copy, Clone)]
+enum NameInner<'a> {
+    Empty,
+    Buffer {
+        component_bytes: &'a [u8],
+        component_count: usize,
+        original_count: usize,
+    },
+    Component {
+        original: &'a Name<'a>,
+        component: NameComponent<'a>,
+    },
 }
 
 struct NameComponentIterator<'a, I>
