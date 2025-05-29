@@ -1,23 +1,29 @@
 use core::marker::PhantomData;
-use core::num::NonZeroU32;
 
 use alloc::{boxed::Box, vec::Vec};
 
-use crate::tables::{PrefixRegistrationResult, Tables};
-
 use crate::{
-    Clock, ContentStore, Data, Digest, FaceError, FaceReceiver, FaceSender, Hasher, Interest, Name,
-    Sha256Digest,
+    clock::Clock,
+    face::{FaceError, FaceReceiver, FaceSender},
+    hash::{Digest, Hasher, Sha256Digest},
+    name::Name,
+    packet::{Data, Interest},
+    store::ContentStore,
+    tables::{PrefixRegistrationResult, Tables},
+    tlv::{DecodingError, Encode, VarintDecodingError, TLV},
 };
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FaceToken(pub(crate) u32);
 
-enum ForwarderError<'a> {
-    FacesDisconnected(&'a [FaceToken]),
+pub enum ForwarderError {
+    NothingToForward,
+    FaceNotfound,
+    FaceDisconnected(FaceToken),
+    FaceUnrecoverableError(DecodingError),
 }
 
-struct Forwarder<CS, C, H>
+pub struct Forwarder<CS, C, H>
 where
     CS: ContentStore,
     C: Clock,
@@ -28,7 +34,6 @@ where
     content_store: CS,
     clock: C,
     last_checked_face: usize,
-    disconnected_faces: Vec<FaceToken>,
     _hash: PhantomData<H>,
 }
 
@@ -48,7 +53,6 @@ where
             content_store,
             clock,
             last_checked_face: 0,
-            disconnected_faces: Default::default(),
             _hash: PhantomData,
         }
     }
@@ -81,15 +85,17 @@ where
         self.tables.unregister_prefix(name_prefix, forward_to)
     }
 
-    pub fn try_recv(&mut self, face: Option<&FaceToken>) -> Result<bool, ForwarderError> {
-        self.disconnected_faces.clear();
-
-        let mut any_received = false;
-
-        if let Some(token) = face {
+    pub fn try_forward(&mut self, face_to_use: Option<&FaceToken>) -> Result<(), ForwarderError> {
+        if let Some(token) = face_to_use {
             // If we were given an explicit face to try we try it
             if let Some(index) = Faces::find_face(&self.faces.faces, token) {
-                any_received |= self.try_recv_from_face(index)
+                if self.try_recv_from_face_at_index(index)? {
+                    Ok(())
+                } else {
+                    Err(ForwarderError::NothingToForward)
+                }
+            } else {
+                Err(ForwarderError::FaceNotfound)
             }
         } else {
             // Otherwise we try all the faces in turn
@@ -99,116 +105,155 @@ where
                 } else {
                     self.last_checked_face + 1
                 };
-                any_received |= self.try_recv_from_face(self.last_checked_face)
+                if self.try_recv_from_face_at_index(self.last_checked_face)? {
+                    return Ok(());
+                }
             }
-        }
-
-        if self.disconnected_faces.len() > 0 {
-            Err(ForwarderError::FacesDisconnected(&self.disconnected_faces))
-        } else {
-            Ok(any_received)
+            Err(ForwarderError::NothingToForward)
         }
     }
 
-    fn try_recv_from_face(&mut self, index: usize) -> bool {
+    fn try_recv_from_face_at_index(&mut self, index: usize) -> Result<bool, ForwarderError> {
+        let (token, entry) = &mut self.faces.faces[index];
+        let origin = FaceToken(*token);
+
+        if entry.should_close {
+            return Err(ForwarderError::FaceDisconnected(origin));
+        }
+
         let (recv_buffer, recv_buffer_cursor) = &mut self.faces.recv_buffers[index];
 
-        let mut any_received = false;
+        let mut should_try_recv = true;
 
-        let origin = {
-            let (token, entry) = &mut self.faces.faces[index];
+        // First, it could be possible that we already have a ready packet in buffer from last recv
+        // If so we will not try to receive new data
+        if *recv_buffer_cursor > 0 {
+            match TLV::try_decode(&recv_buffer[0..*recv_buffer_cursor]) {
+                Ok(_) => should_try_recv = false,
+                // If we have too few bytes this could be solved with a recv
+                Err(DecodingError::CannotDecodeType {
+                    err: VarintDecodingError::BufferTooShort,
+                }) => {}
+                Err(DecodingError::CannotDecodeLength {
+                    err: VarintDecodingError::BufferTooShort,
+                    ..
+                }) => {}
+                Err(DecodingError::CannotDecodeValue { .. }) => {}
+                Err(err) => return Err(ForwarderError::FaceUnrecoverableError(err)),
+            }
+        }
+
+        if should_try_recv {
             match entry.try_recv(recv_buffer, recv_buffer_cursor) {
                 Ok(bytes_received) => {
                     if bytes_received == 0 {
-                        return false; // Nothing was received, the face is not ready
+                        return Ok(false); // Nothing was received, the face is not ready
                     }
                 }
-                Err(FaceError::Disconnected) => self.disconnected_faces.push(FaceToken(*token)),
-            }
-            FaceToken(*token)
-        };
-
-        // We know know that we have got some new bytes, so we will try to parse the packets
-        loop {
-            let mut cursor = 0usize;
-            let typ = unsafe { NonZeroU32::new_unchecked(5) }; // peek int
-            cursor += 3;
-
-            let len = 12usize; // peek len
-            cursor += 3;
-
-            if cursor + len > *recv_buffer_cursor {
-                break; // The packet is incomplete, so we return
-            }
-
-            // If we are here, we could process the full packet
-            let (original_packet, rest) = recv_buffer.split_at_mut(cursor + len);
-
-            match typ.get() {
-                TLV_TYPE_INTEREST => {
-                    // Handle interest
-                    if let Some(interest) =
-                        Interest::from_bytes(&original_packet[cursor..(cursor + len)])
-                    {
-                        Self::handle_interest(
-                            interest,
-                            original_packet,
-                            origin,
-                            &mut self.tables,
-                            &mut self.content_store,
-                            &mut self.clock,
-                            &mut self.faces.faces,
-                            &mut self.disconnected_faces,
-                        );
-                        any_received = true;
-                    } // Otherwise ignore the malformed packet
+                Err(FaceError::Disconnected) => {
+                    return Err(ForwarderError::FaceDisconnected(origin))
                 }
-                TLV_TYPE_DATA => {
-                    // Handle data
-                    if let Some(data) = Data::from_bytes(&original_packet[cursor..(cursor + len)]) {
-                        Self::handle_data(
-                            data,
-                            original_packet,
-                            origin,
-                            &mut self.tables,
-                            &mut self.content_store,
-                            &mut self.clock,
-                            &mut self.faces.faces,
-                            &mut self.disconnected_faces,
-                        );
-                        any_received = true;
-                    } // Otherwise ignore the malformed packet
-                }
-                _ => {} // Otherwise we ignore the packet
-            }
-
-            if cursor + len < *recv_buffer_cursor {
-                // There are still some unprocessed bytes, so we want to loop again
-                recv_buffer.copy_within((cursor + len)..*recv_buffer_cursor, 0);
-                *recv_buffer_cursor -= cursor + len;
-            } else {
-                // We are done with this bunch of bytes
-                *recv_buffer_cursor = 0;
-                break;
             }
         }
 
-        any_received
+        let (tlv, tlv_len) = match TLV::try_decode(&recv_buffer[0..*recv_buffer_cursor]) {
+            Ok((tlv, tlv_len)) => (tlv, tlv_len),
+            // If we have too few bytes this could be solved with a recv
+            Err(DecodingError::CannotDecodeType {
+                err: VarintDecodingError::BufferTooShort,
+            }) => return Ok(false),
+            Err(DecodingError::CannotDecodeLength {
+                err: VarintDecodingError::BufferTooShort,
+                ..
+            }) => return Ok(false),
+            Err(DecodingError::CannotDecodeValue { .. }) => return Ok(false),
+            Err(err) => return Err(ForwarderError::FaceUnrecoverableError(err)),
+        };
+
+        // If we are here, we could process the full packet
+        let mut any_processed = false;
+        match tlv.typ.get() {
+            TLV_TYPE_INTEREST => {
+                let name_offset = (tlv.typ.get() as u64).encoded_length()
+                    + (tlv.val.len() as u64).encoded_length();
+                // Handle interest
+                if let Some(interest) = Interest::from_bytes(tlv.val) {
+                    if let Some((index_of_hop_byte, new_nonce)) = Self::handle_interest(
+                        interest,
+                        origin,
+                        &mut self.tables,
+                        &mut self.content_store,
+                        &mut self.clock,
+                        &mut self.faces.faces,
+                    ) {
+                        let packet_len = tlv_len;
+                        if let Some(hop_byte_index) = index_of_hop_byte {
+                            recv_buffer[hop_byte_index] =
+                                recv_buffer[hop_byte_index].saturating_sub(1);
+                        }
+                        if let Some(new_nonce) = new_nonce {
+                            // TODO: we should set this nonce and possibly re-encode the whole packet
+                            //  as its size's size could have changed. But, could optimize too.
+                        }
+
+                        let name = Name::from_bytes(&recv_buffer[name_offset..*recv_buffer_cursor])
+                            .unwrap();
+                        Self::dispatch_interest(
+                            name,
+                            &recv_buffer[0..packet_len],
+                            origin,
+                            &mut self.tables,
+                            &mut self.faces.faces,
+                        );
+                    }
+                    any_processed = true;
+                } // Otherwise ignore the malformed packet
+            }
+            TLV_TYPE_DATA => {
+                // Handle data
+                if let Some(data) = Data::from_bytes(tlv.val) {
+                    Self::handle_data(
+                        data,
+                        &tlv.val,
+                        origin,
+                        &mut self.tables,
+                        &mut self.content_store,
+                        &mut self.clock,
+                        &mut self.faces.faces,
+                    );
+                    any_processed = true;
+                } // Otherwise ignore the malformed packet
+            }
+            _ => {} // Otherwise we ignore the packet
+        }
+
+        // Reset the cursor back by the size of the processed element
+        if tlv_len < *recv_buffer_cursor {
+            // There are still some unprocessed bytes, so we want to loop again
+            recv_buffer.copy_within(tlv_len..*recv_buffer_cursor, 0);
+            *recv_buffer_cursor -= tlv_len;
+        } else {
+            // We are done with this bunch of bytes
+            *recv_buffer_cursor = 0;
+        }
+
+        Ok(any_processed)
     }
 
+    // Returns the modifications needed to the interest
+    // If Some, we should check for hop_limit and if the
+    //  inner oprion is Some, also set the new nonce
     fn handle_interest<'a>(
         interest: Interest<'a>,
-        original_packet: &'a mut [u8],
         origin: FaceToken,
         tables: &mut Tables,
         content_store: &mut CS,
         clock: &mut C,
         faces: &mut [(u32, FaceEntry)],
-        disconnected_faces: &mut Vec<FaceToken>,
-    ) {
+    ) -> Option<(Option<usize>, Option<[u8; 4]>)> {
         // Interest must have a non-empty name
         if interest.name.component_count() == 0 {
-            return;
+            return None;
         };
 
         // We want to drop packets if they have hop limit of 0,
@@ -219,7 +264,7 @@ where
         let (is_last_hop, hop_needs_decrement) = match &interest.hop_limit {
             Some(hop) => {
                 if *hop == 0 {
-                    return;
+                    return None;
                 } else {
                     (*hop == 1, true)
                 }
@@ -257,16 +302,16 @@ where
                 PrefixRegistrationResult::PreviousFromOthers(should_retransmit) => {
                     // The PIT already has others applying, so we only forward if it was not too long ago
                     if !should_retransmit {
-                        return;
+                        return None;
                     }
                 }
                 PrefixRegistrationResult::DeadNonce => {
                     // The interest likely looped, so we drop it
-                    return;
+                    return None;
                 }
                 PrefixRegistrationResult::InvalidName => {
                     // The interest has an invalid name, so we drop it
-                    return;
+                    return None;
                 }
             }
         }
@@ -284,39 +329,44 @@ where
             // The packet is found so we simply reply to the same face
             if let Some(index) = Faces::find_face(&faces, &origin) {
                 if let Err(FaceError::Disconnected) = faces[index].1.send(retrieved) {
-                    disconnected_faces.push(origin);
+                    faces[index].1.should_close = true;
                 }
             }
-            return;
+            return None;
         }
 
         // Finally, if this is not the last hop of the interest we try to forward it.
         if !is_last_hop {
             // If the interest is missing a nonce we should add one before forwarding
             // But do not for now, since it requires re-encoding the interest
-            /*if interest.nonce.is_none() {
-                let nonce = inner.tables.next_nonce();
-                interest.nonce = Some(nonce);
-                interest_modified = true;
-            }*/
-
-            if hop_needs_decrement {
-                if let Some(hop_byte_index) = interest.index_of_hop_byte() {
-                    original_packet[hop_byte_index] =
-                        original_packet[hop_byte_index].saturating_sub(1);
-                }
+            let mut new_nonce = None;
+            if interest.nonce.is_none() {
+                new_nonce = Some(tables.next_nonce());
             }
 
-            // We now know we need to forward the interest, just need to check where to send it
-            // The strategy we use is basically multicast to all relevant faces, nothing complex.
-            for next_hop in tables.hops_for_name(interest.name) {
-                // Never forward back to the same face
-                if next_hop != origin {
-                    if let Some(index) = Faces::find_face(&faces, &next_hop) {
-                        if let Err(FaceError::Disconnected) = faces[index].1.send(&original_packet)
-                        {
-                            disconnected_faces.push(next_hop);
-                        }
+            let index_of_hop_byte = interest.index_of_hop_byte();
+
+            return Some((index_of_hop_byte, new_nonce));
+        }
+
+        None
+    }
+
+    fn dispatch_interest<'a>(
+        name: Name<'a>,
+        original_packet: &'a [u8],
+        origin: FaceToken,
+        tables: &mut Tables,
+        faces: &mut [(u32, FaceEntry)],
+    ) {
+        // We now know we need to forward the interest, just need to check where to send it
+        // The strategy we use is basically multicast to all relevant faces, nothing complex.
+        for next_hop in tables.hops_for_name(name) {
+            // Never forward back to the same face
+            if next_hop != origin {
+                if let Some(index) = Faces::find_face(&faces, &next_hop) {
+                    if let Err(FaceError::Disconnected) = faces[index].1.send(&original_packet) {
+                        faces[index].1.should_close = true;
                     }
                 }
             }
@@ -331,7 +381,6 @@ where
         content_store: &mut CS,
         clock: &mut C,
         faces: &mut [(u32, FaceEntry)],
-        disconnected_faces: &mut Vec<FaceToken>,
     ) {
         let mut is_unsolicited: bool = true;
 
@@ -339,9 +388,8 @@ where
 
         let mut hasher = H::new();
         // TODO: test this!!! Probably inside the tlv, not packet?
-        hasher.update(
-            &original_packet[data.signed_range_in_parent_tlv.0..data.signed_range_in_parent_tlv.1],
-        );
+        let range = data.signed_range_in_parent_tlv();
+        hasher.update(&original_packet[range.0..range.1]);
         let digest = hasher.finalize().into_inner();
 
         // First we try to find the interest in the PIT and send it to every
@@ -351,7 +399,7 @@ where
             if face != origin {
                 if let Some(index) = Faces::find_face(&faces, &face) {
                     if let Err(FaceError::Disconnected) = faces[index].1.send(original_packet) {
-                        disconnected_faces.push(face);
+                        faces[index].1.should_close = true;
                     }
                 }
             }
@@ -408,6 +456,7 @@ impl Faces {
         let entry = FaceEntry {
             sender: Box::new(sender),
             receiver: Box::new(receiver),
+            should_close: false,
         };
         self.faces.push((token, entry));
         self.recv_buffers.push(([0u8; MAX_PACKET_SIZE], 0));
@@ -446,6 +495,7 @@ const TLV_TYPE_DATA: u32 = 6;
 struct FaceEntry {
     sender: Box<dyn FaceSender>,
     receiver: Box<dyn FaceReceiver>,
+    should_close: bool,
 }
 
 impl FaceEntry {

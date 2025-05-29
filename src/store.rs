@@ -1,4 +1,4 @@
-use crate::{Name, Timestamp};
+use crate::{name::Name, clock::Timestamp};
 
 // Evict unsolicited first, then stale, then fresh.
 

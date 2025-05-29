@@ -1,9 +1,7 @@
-use std::{future::Future, rc::Rc};
 
-//use async_channel::{Receiver, Sender};
-use reto::*;
-//use smol::{block_on, LocalExecutor};
+//use reto::*;
 
+/* 
 struct DummyCS {}
 
 impl ContentStore for DummyCS {
@@ -65,7 +63,7 @@ impl Clock for StdClock {
 }
 
 
-/* 
+
 enum DummyMSG {
     Channel(ChannelFaceSender, ChannelFaceReceiver),
 }
@@ -178,3 +176,8 @@ fn main() {
     println!("After block on");
 }
 */
+
+
+fn main() {
+    
+}

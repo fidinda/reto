@@ -1,9 +1,20 @@
 use core::num::NonZeroU16;
 
-use crate::{
-    encode::{Buffer, Encodable, EncodingError},
-    parse_tlvs, TLV,
-};
+use crate::tlv::{Encode, EncodingError, Write, TLV};
+
+#[derive(Copy, Clone)]
+pub enum NameComponentType {
+    Generic,
+    ImplicitSha256Digest,
+    ParameterSha256Digest,
+    Other(NonZeroU16),
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct NameComponent<'a> {
+    pub typ: NonZeroU16,
+    pub bytes: &'a [u8],
+}
 
 #[derive(Copy, Clone)]
 pub struct Name<'a> {
@@ -19,15 +30,14 @@ impl<'a> Name<'a> {
 
     pub(crate) fn from_bytes(component_bytes: &'a [u8]) -> Option<Self> {
         let mut component_count = 0;
-        for nc in parse_tlvs(&component_bytes) {
-            match nc {
-                Ok(nc_tlv) => {
-                    let _: NonZeroU16 = nc_tlv.tlv.typ.try_into().ok()?;
-                    component_count += 1
-                }
-                Err(_) => return None,
-            }
+        let mut offset = 0;
+        while offset < component_bytes.len() {
+            let (nc_tlv, nc_len) = TLV::try_decode(&component_bytes[offset..]).ok()?;
+            let _: NonZeroU16 = nc_tlv.typ.try_into().ok()?;
+            component_count += 1;
+            offset += nc_len;
         }
+
         let inner = if component_count == 0 {
             NameInner::Empty
         } else {
@@ -106,22 +116,9 @@ impl<'a> Name<'a> {
             &mut free_components,
         );
 
-        let innermost_iter = innermost_bytes.map(|bytes| {
-            parse_tlvs(bytes)
-                .map(|tlv| {
-                    // It would not have been created if there was an error
-                    let tlv = tlv.ok().unwrap().tlv;
-                    let typ: NonZeroU16 = tlv.typ.try_into().unwrap();
-                    NameComponent {
-                        typ,
-                        bytes: tlv.val,
-                    }
-                })
-                .take(innermost_count)
-        });
-
         NameComponentIterator {
-            innermost_iter,
+            innermost_bytes: innermost_bytes.map(|b| (b,0)),
+            innermost_remaining: innermost_count,
             free_components,
             name: *self,
         }
@@ -162,30 +159,33 @@ impl<'a> Name<'a> {
                     component_bytes.len()
                 } else {
                     // Must only take component_count components
-                    let mut component_len = 0;
+                    let mut offset = 0;
                     let mut cc = 0;
-                    let mut parsed = parse_tlvs(component_bytes);
                     while cc < component_count {
+                        let nc_len = match TLV::try_decode(&component_bytes[offset..]) {
+                            Ok((_, nc_len)) => nc_len,
+                            Err(_) => unreachable!(), // otherwise would not have been created
+                        };
                         cc += 1;
-                        let n = parsed.next();
-                        if cc == component_count {
-                            component_len = n.unwrap().ok().unwrap().byte_range.1
-                        }
+                        offset += nc_len;
                     }
-                    component_len
+                    offset
                 }
             }
             NameInner::Component {
                 original,
                 component,
             } => {
-                let tlv: TLV<'_> = component.into();
+                let tlv = TLV {
+                    typ: component.typ.into(),
+                    val: &component.bytes,
+                };
                 original.component_len() + tlv.encoded_length()
             }
         }
     }
 
-    fn component_encode<B: Buffer>(&self, buffer: &mut B) -> Result<(), EncodingError> {
+    fn component_encode<W: Write>(&self, writer: &mut W) -> Result<(), EncodingError> {
         match self.inner {
             NameInner::Empty => Ok(()),
             NameInner::Buffer {
@@ -195,29 +195,31 @@ impl<'a> Name<'a> {
             } => {
                 if component_count == original_count {
                     // Can copy unmodified buffer
-                    buffer.push(component_bytes)
+                    writer.write(component_bytes)
                 } else {
+                    let mut offset = 0;
                     let mut cc = 0;
-                    let mut parsed = parse_tlvs(component_bytes);
                     while cc < component_count {
+                        let nc_len = match TLV::try_decode(&component_bytes[offset..]) {
+                            Ok((_, nc_len)) => nc_len,
+                            Err(_) => unreachable!(), // otherwise would not have been created
+                        };
                         cc += 1;
-                        if let Some(Ok(e)) = parsed.next() {
-                            let tlv = e.tlv;
-                            tlv.encode(buffer)?
-                        } else {
-                            unreachable!()
-                        }
+                        offset += nc_len;
                     }
-                    Ok(())
+                    writer.write(&component_bytes[0..offset])
                 }
             }
             NameInner::Component {
                 original,
                 component,
             } => {
-                original.component_encode(buffer)?;
-                let tlv: TLV<'_> = component.into();
-                tlv.encode(buffer)
+                original.component_encode(writer)?;
+                let tlv = TLV {
+                    typ: component.typ.into(),
+                    val: &component.bytes,
+                };
+                tlv.encode(writer)
             }
         }
     }
@@ -225,7 +227,7 @@ impl<'a> Name<'a> {
 
 const TLV_TYPE_NAME: u32 = 7;
 
-impl<'a> Encodable for Name<'a> {
+impl<'a> Encode for Name<'a> {
     fn encoded_length(&self) -> usize {
         let component_len = self.component_len();
         (TLV_TYPE_NAME as u64).encoded_length()
@@ -233,14 +235,13 @@ impl<'a> Encodable for Name<'a> {
             + component_len
     }
 
-    fn encode<B: crate::encode::Buffer>(&self, buffer: &mut B) -> Result<(), EncodingError> {
+    fn encode<W: Write>(&self, writer: &mut W) -> Result<(), EncodingError> {
         let component_len = self.component_len();
-        (TLV_TYPE_NAME as u64).encode(buffer)?;
-        (component_len as u64).encode(buffer)?;
-        self.component_encode(buffer)
+        (TLV_TYPE_NAME as u64).encode(writer)?;
+        (component_len as u64).encode(writer)?;
+        self.component_encode(writer)
     }
 }
-
 
 #[derive(Copy, Clone)]
 enum NameInner<'a> {
@@ -256,28 +257,34 @@ enum NameInner<'a> {
     },
 }
 
-struct NameComponentIterator<'a, I>
-where
-    I: Iterator<Item = NameComponent<'a>>,
-{
-    innermost_iter: Option<I>,
+struct NameComponentIterator<'a> {
+    innermost_bytes: Option<(&'a [u8], usize)>,
+    innermost_remaining: usize,
     free_components: usize,
     name: Name<'a>,
 }
 
-impl<'a, I> Iterator for NameComponentIterator<'a, I>
-where
-    I: Iterator<Item = NameComponent<'a>>,
-{
+impl<'a> Iterator for NameComponentIterator<'a> {
     type Item = NameComponent<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.innermost_iter.as_mut() {
-            Some(i) => match i.next() {
-                Some(v) => Some(v),
-                None => {
-                    self.innermost_iter = None;
-                    self.next()
+        if self.innermost_remaining == 0 {
+            self.innermost_bytes = None;
+        }
+
+        match self.innermost_bytes.as_mut() {
+            Some((bytes, offset)) => {
+                match TLV::try_decode(&bytes[*offset..]) {
+                    Ok((nc_tlv, nc_len)) => {
+                        *offset += nc_len;
+                        self.innermost_remaining -= 1;
+                        Some(NameComponent {
+                            // Would not have been created
+                            typ: nc_tlv.typ.try_into().unwrap(),
+                            bytes: nc_tlv.val,
+                        })
+                    },
+                    Err(_) => unreachable!(), // otherwise would not have been created
                 }
             },
             None => {
@@ -300,29 +307,6 @@ where
             }
         }
     }
-}
-
-impl<'a> From<NameComponent<'a>> for TLV<'a> {
-    fn from(value: NameComponent<'a>) -> Self {
-        TLV {
-            typ: value.typ.into(),
-            val: &value.bytes,
-        }
-    }
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct NameComponent<'a> {
-    pub typ: NonZeroU16,
-    pub bytes: &'a [u8],
-}
-
-#[derive(Copy, Clone)]
-pub enum NameComponentType {
-    Generic,
-    ImplicitSha256Digest,
-    ParameterSha256Digest,
-    Other(NonZeroU16),
 }
 
 impl From<NonZeroU16> for NameComponentType {

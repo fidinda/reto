@@ -2,7 +2,7 @@ use core::num::{NonZeroU16, NonZeroU32};
 
 use alloc::{collections::BTreeMap, vec::Vec};
 
-use crate::{FaceToken, Name, NameComponent, NameComponentType, Timestamp};
+use crate::{ name::{Name, NameComponent, NameComponentType}, forwarder::FaceToken, clock::Timestamp};
 
 pub(crate) enum PrefixRegistrationResult {
     NewRegistration,
