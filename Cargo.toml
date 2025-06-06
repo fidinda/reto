@@ -16,12 +16,8 @@ name = "reto"
 [[example]]
 name = "smol_test"
 
-
 [dependencies]
-futures-util = { version = "0.3", features = ["sink"] } # Only used for the control stream now
 
 
 [dev-dependencies]
-smol = "2"
-async-channel = "2"
 sha2 = "0.10"

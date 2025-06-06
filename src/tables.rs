@@ -2,7 +2,7 @@ use core::num::{NonZeroU16, NonZeroU32};
 
 use alloc::{collections::BTreeMap, vec::Vec};
 
-use crate::{FaceHandle, Name, NameComponent, NameComponentType, Timestamp};
+use crate::{ name::{Name, NameComponent, NameComponentType}, forwarder::FaceToken, clock::Timestamp};
 
 pub(crate) enum PrefixRegistrationResult {
     NewRegistration,
@@ -14,8 +14,8 @@ pub(crate) enum PrefixRegistrationResult {
 
 pub(crate) struct Tables {
     entries: DefaultEntries,
-    face_map: BTreeMap<FaceHandle, usize>,
-    face_scratch: Vec<(FaceHandle, usize)>,
+    face_map: BTreeMap<FaceToken, usize>,
+    face_scratch: Vec<(FaceToken, usize)>,
     pruning_stack: Vec<(EntryIndex, ParentOrSibling)>,
     time_of_last_update: Timestamp,
     events_sice_last_update: u64,
@@ -52,7 +52,7 @@ impl Tables {
         self.next_nonce.to_be_bytes()
     }
 
-    pub fn unregister_face<'a>(&mut self, face: FaceHandle) {
+    pub fn unregister_face<'a>(&mut self, face: FaceToken) {
         for entry in self.entries.entries.iter_mut() {
             if entry.is_unused {
                 continue;
@@ -78,7 +78,7 @@ impl Tables {
     }
 
     // FIB methods
-    pub fn register_prefix<'a>(&mut self, name_prefix: Name<'a>, face: FaceHandle) {
+    pub fn register_prefix<'a>(&mut self, name_prefix: Name<'a>, face: FaceToken) {
         let fib_entry = FibEntry { next_hop: face };
 
         let (mut entry, insertion_index) = if name_prefix.component_count() == 0 {
@@ -127,7 +127,7 @@ impl Tables {
         }
     }
 
-    pub fn unregister_prefix<'a>(&mut self, name_prefix: Name<'a>, face: FaceHandle) -> bool {
+    pub fn unregister_prefix<'a>(&mut self, name_prefix: Name<'a>, face: FaceToken) -> bool {
         let fib_entry = FibEntry { next_hop: face };
 
         let mut entry = if name_prefix.component_count() == 0 {
@@ -159,7 +159,7 @@ impl Tables {
         }
     }
 
-    pub fn hops_for_name<'a>(&mut self, name: Name<'a>) -> impl Iterator<Item = FaceHandle> + '_ {
+    pub fn hops_for_name<'a>(&mut self, name: Name<'a>) -> impl Iterator<Item = FaceToken> + '_ {
         // We want to return the unique set of faces ordered by depth
         self.face_map.clear();
         self.face_scratch.clear();
@@ -186,7 +186,7 @@ impl Tables {
         &mut self,
         name: Name<'a>,
         can_be_prefix: bool,
-        reply_to: FaceHandle,
+        reply_to: FaceToken,
         now: Timestamp,
         retransmission_period: u64,
         deadline: Timestamp,
@@ -344,7 +344,7 @@ impl Tables {
         name: Name<'a>,
         digest: [u8; 32],
         now: Timestamp,
-    ) -> impl Iterator<Item = FaceHandle> + '_ {
+    ) -> impl Iterator<Item = FaceToken> + '_ {
         self.events_sice_last_update += 1;
 
         self.face_map.clear();
@@ -829,13 +829,13 @@ impl<const N: usize, const F: usize, const P: usize> Default for TableEntry<N, F
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct FibEntry {
-    next_hop: FaceHandle,
+    next_hop: FaceToken,
 }
 
 impl Default for FibEntry {
     fn default() -> Self {
         Self {
-            next_hop: FaceHandle(u32::MAX),
+            next_hop: FaceToken(u32::MAX),
         }
     }
 }
@@ -844,7 +844,7 @@ impl Default for FibEntry {
 struct PitEntry<const P: usize> {
     deadline: Timestamp,
     next_transmission: Timestamp,
-    reply_to: [FaceHandle; P],
+    reply_to: [FaceToken; P],
 
     // TODO: bits
     can_be_prefix: [bool; P],
@@ -858,7 +858,7 @@ impl<const P: usize> Default for PitEntry<P> {
     fn default() -> Self {
         Self {
             can_be_prefix: [false; P],
-            reply_to: [FaceHandle(u32::MAX); P],
+            reply_to: [FaceToken(u32::MAX); P],
             deadline: Timestamp {
                 ms_since_1970: u64::MIN,
             },

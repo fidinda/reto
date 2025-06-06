@@ -1,4 +1,8 @@
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub trait Clock {
+    fn now(&mut self) -> Timestamp;
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 pub struct Timestamp {
     pub ms_since_1970: u64,
 }

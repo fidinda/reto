@@ -1,25 +1,19 @@
 mod datagram_face;
-pub use datagram_face::*;
-
-use core::future::Future;
-
-// The Face abstracts away the underlying data transfer protocols.
-
-// It operates using raw bytes and can arbitrarily fragment the data
-//  to satisfy the underlying networking mechanism.
-
-// It is split into a sender and a recever halves such that we can
-//  drive them separately inside the forwarder.
-// Conceptually they still jointly refer to the same interface.
 
 pub enum FaceError {
     Disconnected,
 }
 
 pub trait FaceSender {
-    fn send(&mut self, src: &[u8]) -> impl Future<Output = Result<usize, FaceError>>;
+    // This lets us send bytes to the face.
+    // It returns the number of bytes sent on success or a FaceError.
+    // It can return 0 if the face is not ready to send right now.
+    fn send(&mut self, src: &[u8]) -> Result<usize, FaceError>;
 }
 
 pub trait FaceReceiver {
-    fn recv(&mut self, dst: &mut [u8]) -> impl Future<Output = Result<usize, FaceError>>;
+    // We try to receive the bytes from the face if any are available.
+    // It returns the number of bytes received on success or a FaceError.
+    // If the face has no bytes ready it returns 0.
+    fn try_recv(&mut self, dst: &mut [u8]) -> Result<usize, FaceError>;
 }
