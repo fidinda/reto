@@ -1,11 +1,13 @@
 use core::num::NonZeroU32;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum VarintDecodingError {
     BufferTooShort,
     NonMinimalIntegerEncoding,
     InvalidValue,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DecodingError {
     CannotDecodeType {
         err: VarintDecodingError,
@@ -20,6 +22,7 @@ pub enum DecodingError {
     },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EncodingError {
     BufferTooShort,
 }
@@ -33,7 +36,7 @@ pub trait Encode {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<(), EncodingError>;
 }
 
-#[derive(Copy, Clone)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TLV<'a> {
     pub typ: NonZeroU32,
     pub val: &'a [u8],
@@ -61,8 +64,11 @@ impl<'a> TLV<'a> {
 impl<'a> TLV<'a> {
     pub fn try_decode(bytes: &'a [u8]) -> Result<(TLV<'a>, usize), DecodingError> {
         let mut cursor = 0;
-        let typ: u32 = Self::parse_varint(bytes, &mut cursor)
-            .map_err(|err| DecodingError::CannotDecodeType { err })?
+        let (typ, typ_len) = Self::parse_varint(&bytes[cursor..])
+            .map_err(|err| DecodingError::CannotDecodeType { err })?;
+        cursor += typ_len;
+
+        let typ: u32 = typ
             .try_into()
             .map_err(|_| DecodingError::CannotDecodeType {
                 err: VarintDecodingError::InvalidValue,
@@ -71,8 +77,11 @@ impl<'a> TLV<'a> {
             err: VarintDecodingError::InvalidValue,
         })?;
 
-        let len: usize = Self::parse_varint(bytes, &mut cursor)
-            .map_err(|err| DecodingError::CannotDecodeLength { typ, err })?
+        let (len, len_len) = Self::parse_varint(&bytes[cursor..])
+            .map_err(|err| DecodingError::CannotDecodeLength { typ, err })?;
+        cursor += len_len;
+
+        let len: usize = len
             .try_into()
             .map_err(|_| DecodingError::CannotDecodeLength {
                 typ,
@@ -87,46 +96,43 @@ impl<'a> TLV<'a> {
         Ok((TLV { typ, val }, cursor + len))
     }
 
-    fn parse_varint(bytes: &[u8], cursor: &mut usize) -> Result<u64, VarintDecodingError> {
-        let first = bytes[*cursor];
-        *cursor += 1;
-        match first {
-            0..=252 => Ok(first as u64),
+    pub fn parse_varint(bytes: &[u8]) -> Result<(u64, usize), VarintDecodingError> {
+        let len = bytes.len();
+        if len == 0 {
+            return Err(VarintDecodingError::BufferTooShort);
+        }
+
+        match bytes[0] {
+            0..=252 => Ok((bytes[0] as u64, 1)),
             253 => {
-                if *cursor + 2 >= bytes.len() {
+                if len < 3 {
                     return Err(VarintDecodingError::BufferTooShort);
                 }
-                let next: [u8; 2] = bytes[*cursor..(*cursor + 2)].try_into().unwrap();
-                *cursor += 2;
-                let val = u16::from_be_bytes(next);
+                let val = u16::from_be_bytes(bytes[1..3].try_into().unwrap());
                 if val > 252 {
-                    Ok(val as u64)
+                    Ok((val as u64, 3))
                 } else {
                     Err(VarintDecodingError::NonMinimalIntegerEncoding)
                 }
             }
             254 => {
-                if *cursor + 4 >= bytes.len() {
+                if len < 5 {
                     return Err(VarintDecodingError::BufferTooShort);
                 }
-                let next: [u8; 4] = bytes[*cursor..(*cursor + 4)].try_into().unwrap();
-                *cursor += 4;
-                let val = u32::from_be_bytes(next);
+                let val = u32::from_be_bytes(bytes[1..5].try_into().unwrap());
                 if val > 65535 {
-                    Ok(val as u64)
+                    Ok((val as u64, 5))
                 } else {
                     Err(VarintDecodingError::NonMinimalIntegerEncoding)
                 }
             }
             255 => {
-                if *cursor + 8 >= bytes.len() {
+                if len < 9 {
                     return Err(VarintDecodingError::BufferTooShort);
                 }
-                let next: [u8; 8] = bytes[*cursor..(*cursor + 8)].try_into().unwrap();
-                *cursor += 8;
-                let val = u64::from_be_bytes(next);
+                let val = u64::from_be_bytes(bytes[1..9].try_into().unwrap());
                 if val > 4294967295 {
-                    Ok(val)
+                    Ok((val, 9))
                 } else {
                     Err(VarintDecodingError::NonMinimalIntegerEncoding)
                 }
@@ -179,10 +185,36 @@ impl<'a> Encode for TLV<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::tlv::Encode;
+    use core::num::NonZeroU32;
+
+    use crate::tlv::{DecodingError, Encode, EncodingError, VarintDecodingError, TLV};
+    use alloc::vec::Vec;
+
+    impl super::Write for Vec<u8> {
+        fn write(&mut self, bytes: &[u8]) -> Result<(), EncodingError> {
+            self.extend_from_slice(bytes);
+            Ok(())
+        }
+    }
+
+    struct SliceBuffer<const N: usize> {
+        bytes: [u8; N],
+        cursor: usize,
+    }
+
+    impl<const N: usize> super::Write for SliceBuffer<N> {
+        fn write(&mut self, bytes: &[u8]) -> Result<(), EncodingError> {
+            if self.cursor + bytes.len() <= N {
+                self.bytes[self.cursor..(self.cursor + bytes.len())].copy_from_slice(bytes);
+                self.cursor += bytes.len();
+                return Ok(());
+            }
+            Err(EncodingError::BufferTooShort)
+        }
+    }
 
     #[test]
-    fn test_unsigned() {
+    fn test_unsigned_size() {
         for v in 0u64..252 {
             assert_eq!(v.encoded_length(), 1);
         }
@@ -194,5 +226,229 @@ mod tests {
         assert_eq!(65536u64.encoded_length(), 5);
         assert_eq!(4294967295u64.encoded_length(), 5);
         assert_eq!(4294967296u64.encoded_length(), 9);
+    }
+
+    #[test]
+    fn test_unsigned_encode_decode() {
+        let mut buf = Vec::new();
+
+        let mut s0: SliceBuffer<0> = SliceBuffer {
+            bytes: [],
+            cursor: 0,
+        };
+        let mut s1: SliceBuffer<1> = SliceBuffer {
+            bytes: [0; 1],
+            cursor: 0,
+        };
+        let mut s3: SliceBuffer<3> = SliceBuffer {
+            bytes: [0; 3],
+            cursor: 0,
+        };
+        let mut s4: SliceBuffer<4> = SliceBuffer {
+            bytes: [0; 4],
+            cursor: 0,
+        };
+        let mut s5: SliceBuffer<5> = SliceBuffer {
+            bytes: [0; 5],
+            cursor: 0,
+        };
+        let mut s8: SliceBuffer<8> = SliceBuffer {
+            bytes: [0; 8],
+            cursor: 0,
+        };
+        let mut s9: SliceBuffer<9> = SliceBuffer {
+            bytes: [0; 9],
+            cursor: 0,
+        };
+
+        for v in (0u64..256)
+            .chain(65535..65537)
+            .chain(4294967295..4294967297)
+        {
+            buf.clear();
+            s0.cursor = 0;
+            s1.cursor = 0;
+            s3.cursor = 0;
+            s4.cursor = 0;
+            s5.cursor = 0;
+            s8.cursor = 0;
+            s9.cursor = 0;
+
+            let ret = v.encode(&mut buf);
+            assert_eq!(ret, Ok(()));
+            assert_eq!(v.encoded_length(), buf.len());
+            let dec = TLV::parse_varint(&buf);
+            assert_eq!(dec.is_ok(), true);
+            let (dec, dec_len) = dec.unwrap();
+            assert_eq!(dec_len, v.encoded_length());
+            assert_eq!(dec, v);
+
+            match v.encoded_length() {
+                1 => {
+                    assert_eq!(v.encode(&mut s0), Err(EncodingError::BufferTooShort));
+                    assert_eq!(v.encode(&mut s1), Ok(()));
+                    assert_eq!(v.encode(&mut s3), Ok(()));
+                    assert_eq!(v.encode(&mut s4), Ok(()));
+                    assert_eq!(v.encode(&mut s5), Ok(()));
+                    assert_eq!(v.encode(&mut s8), Ok(()));
+                    assert_eq!(v.encode(&mut s9), Ok(()));
+                }
+                3 => {
+                    assert_eq!(v.encode(&mut s0), Err(EncodingError::BufferTooShort));
+                    assert_eq!(v.encode(&mut s1), Err(EncodingError::BufferTooShort));
+                    assert_eq!(v.encode(&mut s3), Ok(()));
+                    assert_eq!(v.encode(&mut s4), Ok(()));
+                    assert_eq!(v.encode(&mut s5), Ok(()));
+                    assert_eq!(v.encode(&mut s8), Ok(()));
+                    assert_eq!(v.encode(&mut s9), Ok(()));
+                }
+                5 => {
+                    assert_eq!(v.encode(&mut s0), Err(EncodingError::BufferTooShort));
+                    assert_eq!(v.encode(&mut s1), Err(EncodingError::BufferTooShort));
+                    assert_eq!(v.encode(&mut s3), Err(EncodingError::BufferTooShort));
+                    assert_eq!(v.encode(&mut s4), Err(EncodingError::BufferTooShort));
+                    assert_eq!(v.encode(&mut s5), Ok(()));
+                    assert_eq!(v.encode(&mut s8), Ok(()));
+                    assert_eq!(v.encode(&mut s9), Ok(()));
+                }
+                9 => {
+                    assert_eq!(v.encode(&mut s0), Err(EncodingError::BufferTooShort));
+                    assert_eq!(v.encode(&mut s1), Err(EncodingError::BufferTooShort));
+                    assert_eq!(v.encode(&mut s3), Err(EncodingError::BufferTooShort));
+                    assert_eq!(v.encode(&mut s4), Err(EncodingError::BufferTooShort));
+                    assert_eq!(v.encode(&mut s5), Err(EncodingError::BufferTooShort));
+                    assert_eq!(v.encode(&mut s8), Err(EncodingError::BufferTooShort));
+                    assert_eq!(v.encode(&mut s9), Ok(()));
+                }
+                _ => panic!(),
+            }
+        }
+    }
+
+    #[test]
+    fn test_tlv_encode_decode() {
+        use alloc::vec::Vec;
+        let mut buf = Vec::new();
+
+        let types = [
+            NonZeroU32::new(1).unwrap(),
+            NonZeroU32::new(252).unwrap(),
+            NonZeroU32::new(255).unwrap(),
+            NonZeroU32::new(256).unwrap(),
+            NonZeroU32::new(256).unwrap(),
+            NonZeroU32::new(65535).unwrap(),
+            NonZeroU32::new(65536).unwrap(),
+            NonZeroU32::new(4294967295).unwrap(),
+        ];
+
+        for v in (0u64..256)
+            .chain(65535..65537)
+            .chain(4294967295..4294967297)
+        {
+            use alloc::vec;
+            let payload = vec![(v % 256) as u8; v as usize];
+
+            for typ in types {
+                buf.clear();
+                let tlv = TLV { typ, val: &payload };
+                let ret = tlv.encode(&mut buf);
+                assert_eq!(ret, Ok(()));
+                assert_eq!(tlv.encoded_length(), buf.len());
+                let dec = TLV::try_decode(&buf);
+                assert_eq!(dec.is_ok(), true);
+                let (dec, dec_len) = dec.unwrap();
+                assert_eq!(dec_len, tlv.encoded_length());
+                assert_eq!(dec.typ, typ);
+                assert_eq!(dec.val, &payload);
+
+                let mut s0: SliceBuffer<0> = SliceBuffer {
+                    bytes: [],
+                    cursor: 0,
+                };
+                assert_eq!(tlv.encode(&mut s0), Err(EncodingError::BufferTooShort));
+            }
+        }
+
+        assert_eq!(
+            TLV::try_decode(&[]),
+            Err(DecodingError::CannotDecodeType {
+                err: VarintDecodingError::BufferTooShort
+            })
+        );
+        assert_eq!(
+            TLV::try_decode(&[0]),
+            Err(DecodingError::CannotDecodeType {
+                err: VarintDecodingError::InvalidValue
+            })
+        );
+        assert_eq!(
+            TLV::try_decode(&[255, 255, 255, 255, 255, 255, 255, 255, 255]),
+            Err(DecodingError::CannotDecodeType {
+                err: VarintDecodingError::InvalidValue
+            })
+        );
+        assert_eq!(
+            TLV::try_decode(&[253, 0, 0]),
+            Err(DecodingError::CannotDecodeType {
+                err: VarintDecodingError::NonMinimalIntegerEncoding
+            })
+        );
+
+        assert_eq!(
+            TLV::try_decode(&[1, 0]),
+            Ok((
+                TLV {
+                    typ: NonZeroU32::new(1).unwrap(),
+                    val: &[]
+                },
+                2
+            ))
+        );
+
+        assert_eq!(
+            TLV::try_decode(&[1, 0, 0]),
+            Ok((
+                TLV {
+                    typ: NonZeroU32::new(1).unwrap(),
+                    val: &[]
+                },
+                2
+            ))
+        );
+
+        assert_eq!(
+            TLV::try_decode(&[1]),
+            Err(DecodingError::CannotDecodeLength {
+                typ: NonZeroU32::new(1).unwrap(),
+                err: VarintDecodingError::BufferTooShort
+            })
+        );
+
+        assert_eq!(
+            TLV::try_decode(&[1, 1, 1]),
+            Ok((
+                TLV {
+                    typ: NonZeroU32::new(1).unwrap(),
+                    val: &[1]
+                },
+                3
+            ))
+        );
+
+        assert_eq!(
+            TLV::try_decode(&[1, 253, 0, 0]),
+            Err(DecodingError::CannotDecodeLength {
+                typ: NonZeroU32::new(1).unwrap(),
+                err: VarintDecodingError::NonMinimalIntegerEncoding
+            })
+        );
+
+        assert_eq!(
+            TLV::try_decode(&[1, 5, 0, 0]),
+            Err(DecodingError::CannotDecodeValue {
+                typ: NonZeroU32::new(1).unwrap(),
+                len: 5
+            })
+        );
     }
 }

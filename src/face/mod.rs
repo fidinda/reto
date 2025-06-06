@@ -14,6 +14,6 @@ pub trait FaceSender {
 pub trait FaceReceiver {
     // We try to receive the bytes from the face if any are available.
     // It returns the number of bytes received on success or a FaceError.
-    // If the face has no bytes ready it returns
+    // If the face has no bytes ready it returns 0.
     fn try_recv(&mut self, dst: &mut [u8]) -> Result<usize, FaceError>;
 }

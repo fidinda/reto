@@ -85,7 +85,6 @@ impl<'a> Data<'a> {
         let mut meta_info = None;
         let mut content = None;
         let mut signature_info = None;
-        let mut signature_info_last_byte_index = 0;
         let mut signature_value = None;
         let mut unknown_tlv_ranges = [(0usize, 0usize); 3];
 
@@ -177,6 +176,7 @@ pub struct ApplicationParameters<'a> {
 
 impl<'a> ApplicationParameters<'a> {
     pub fn from_bytes(bytes: &'a [u8]) -> Option<Self> {
+        todo!();
         None
     }
 }
