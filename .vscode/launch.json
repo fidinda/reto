@@ -7,24 +7,6 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug example 'smol_test'",
-            "cargo": {
-                "args": [
-                    "build",
-                    "--example=smol_test",
-                    "--package=reto"
-                ],
-                "filter": {
-                    "name": "smol_test",
-                    "kind": "example"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}"
-        },
-        {
-            "type": "lldb",
-            "request": "launch",
             "name": "Debug unit tests in library 'reto'",
             "cargo": {
                 "args": [
@@ -36,26 +18,6 @@
                 "filter": {
                     "name": "reto",
                     "kind": "lib"
-                }
-            },
-            "args": [],
-            "cwd": "${workspaceFolder}"
-        },
-        
-        {
-            "type": "lldb",
-            "request": "launch",
-            "name": "Debug unit tests in example 'smol_test'",
-            "cargo": {
-                "args": [
-                    "test",
-                    "--no-run",
-                    "--example=smol_test",
-                    "--package=reto"
-                ],
-                "filter": {
-                    "name": "smol_test",
-                    "kind": "example"
                 }
             },
             "args": [],
