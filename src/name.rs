@@ -117,7 +117,7 @@ impl<'a> Name<'a> {
         );
 
         NameComponentIterator {
-            innermost_bytes: innermost_bytes.map(|b| (b,0)),
+            innermost_bytes: innermost_bytes.map(|b| (b, 0)),
             innermost_remaining: innermost_count,
             free_components,
             name: *self,
@@ -283,10 +283,10 @@ impl<'a> Iterator for NameComponentIterator<'a> {
                             typ: nc_tlv.typ.try_into().unwrap(),
                             bytes: nc_tlv.val,
                         })
-                    },
+                    }
                     Err(_) => unreachable!(), // otherwise would not have been created
                 }
-            },
+            }
             None => {
                 //TODO: this is very much untested, probable off-by one errors
                 let mut depth = 0;

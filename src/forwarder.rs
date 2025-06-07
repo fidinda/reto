@@ -261,15 +261,15 @@ where
         //  hop limit is 0 we will only try to satisfy this from
         //  the content store, but not forward.
         // If no hop limit is present we always accept the interest.
-        let (is_last_hop, hop_needs_decrement) = match &interest.hop_limit {
+        let is_last_hop = match &interest.hop_limit {
             Some(hop) => {
                 if *hop == 0 {
                     return None;
                 } else {
-                    (*hop == 1, true)
+                    *hop == 1
                 }
             }
-            None => (false, false),
+            None => false,
         };
 
         // We check the PIT before CS because it is smaller/faster
