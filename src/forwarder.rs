@@ -484,7 +484,7 @@ impl Faces {
     }
 }
 
-const MAX_PACKET_SIZE: usize = 8192;
+const MAX_PACKET_SIZE: usize = 8800;
 
 const DEFAULT_DEADLINE_INCREMENT_MS: u64 = 4000; // 4 sec
 const RETRANSMISSION_PERIOD_MS: u64 = 1000; // 1 sec
