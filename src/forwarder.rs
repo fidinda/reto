@@ -1,15 +1,13 @@
-use core::marker::PhantomData;
-
 use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
     clock::Clock,
     face::{FaceError, FaceReceiver, FaceSender},
     hash::{Digest, Hasher, Sha256Digest},
+    io::Write,
     name::Name,
     packet::{Data, Interest},
-    store::ContentStore,
-    tables::{PrefixRegistrationResult, Tables},
+    tables::Tables,
     tlv::{DecodingError, Encode, VarintDecodingError, TLV},
 };
 
@@ -20,40 +18,58 @@ pub enum ForwarderError {
     NothingToForward,
     FaceNotfound,
     FaceDisconnected(FaceToken),
-    FaceUnrecoverableError(DecodingError),
+    FaceUnrecoverableError(FaceToken, DecodingError),
 }
 
-pub struct Forwarder<CS, C, H>
+pub trait ForwarderMetrics {
+    fn interest_received(&mut self, _from_face: FaceToken) {}
+    fn interest_dropped(&mut self, _from_face: FaceToken) {}
+    fn interest_satisfied(&mut self, _from_face: FaceToken) {}
+    fn interest_timed_out(&mut self, _from_face: FaceToken) {}
+    fn interest_sent(&mut self, _to_face: FaceToken) {}
+
+    fn data_received(&mut self, _from_face: FaceToken) {}
+    fn data_sent(&mut self, _to_face: FaceToken) {}
+    fn data_dropped(&mut self, _from_face: FaceToken) {}
+
+    fn invalid_packet_received(&mut self, _from_face: FaceToken) {}
+
+    // TODO: probably count how many data from cache vs 
+    // TODO: add bytes
+}
+
+pub struct Forwarder<C, H, M, T>
 where
-    CS: ContentStore,
     C: Clock,
     H: Hasher<32, Digest = Sha256Digest>,
+    M: ForwarderMetrics,
+    T: Tables,
 {
     faces: Faces,
-    tables: Tables,
-    content_store: CS,
+    tables: T,
+    metrics: M,
     clock: C,
+    hasher: H,
     last_checked_face: usize,
-    _hash: PhantomData<H>,
 }
 
-impl<CS, C, H> Forwarder<CS, C, H>
+impl<C, H, M, T> Forwarder<C, H, M, T>
 where
-    CS: ContentStore,
     C: Clock,
     H: Hasher<32, Digest = Sha256Digest>,
+    M: ForwarderMetrics,
+    T: Tables,
 {
-    pub fn new(content_store: CS, clock: C) -> Self {
+    pub fn new(clock: C, hasher: H, metrics: M, tables: T,) -> Self {
         let faces = Faces::new();
-        let tables = Tables::new();
 
         Self {
             faces,
             tables,
-            content_store,
+            metrics,
             clock,
+            hasher,
             last_checked_face: 0,
-            _hash: PhantomData,
         }
     }
 
@@ -73,8 +89,9 @@ where
         &mut self,
         name_prefix: Name<'a>,
         forward_to: FaceToken,
+        cost: u32,
     ) {
-        self.tables.register_prefix(name_prefix, forward_to)
+        self.tables.register_prefix(name_prefix, forward_to, cost)
     }
 
     pub fn unregister_name_prefix_for_forwarding<'a>(
@@ -85,8 +102,8 @@ where
         self.tables.unregister_prefix(name_prefix, forward_to)
     }
 
-    pub fn try_forward(&mut self, face_to_use: Option<&FaceToken>) -> Result<(), ForwarderError> {
-        if let Some(token) = face_to_use {
+    pub fn forward(&mut self, face_to_use: Option<&FaceToken>) -> Result<(), ForwarderError> {
+        let ret = if let Some(token) = face_to_use {
             // If we were given an explicit face to try we try it
             if let Some(index) = Faces::find_face(&self.faces.faces, token) {
                 if self.try_recv_from_face_at_index(index)? {
@@ -110,7 +127,9 @@ where
                 }
             }
             Err(ForwarderError::NothingToForward)
-        }
+        };
+        self.tables.prune_if_needed(self.clock.now());
+        ret
     }
 
     fn try_recv_from_face_at_index(&mut self, index: usize) -> Result<bool, ForwarderError> {
@@ -139,7 +158,7 @@ where
                     ..
                 }) => {}
                 Err(DecodingError::CannotDecodeValue { .. }) => {}
-                Err(err) => return Err(ForwarderError::FaceUnrecoverableError(err)),
+                Err(err) => return Err(ForwarderError::FaceUnrecoverableError(origin, err)),
             }
         }
 
@@ -166,70 +185,63 @@ where
                 err: VarintDecodingError::BufferTooShort,
                 ..
             }) => return Ok(false),
-            Err(DecodingError::CannotDecodeValue { .. }) => return Ok(false),
-            Err(err) => return Err(ForwarderError::FaceUnrecoverableError(err)),
+            Err(DecodingError::CannotDecodeValue { len, .. }) => {
+                if len > MAX_PACKET_SIZE {
+                    // TODO: should skip too-large packets, probably
+                }
+                return Ok(false);
+            }
+            Err(err) => return Err(ForwarderError::FaceUnrecoverableError(origin, err)),
         };
 
         // If we are here, we could process the full packet
         let mut any_processed = false;
         match tlv.typ.get() {
             TLV_TYPE_INTEREST => {
-                let name_offset = (tlv.typ.get() as u64).encoded_length()
-                    + (tlv.val.len() as u64).encoded_length();
                 // Handle interest
-                if let Some(interest) = Interest::from_bytes(tlv.val) {
-                    if let Some((index_of_hop_byte, new_nonce)) = Self::handle_interest(
+                if let Some(interest) = Interest::try_decode(tlv.val) {
+                    Self::handle_interest(
                         interest,
+                        &recv_buffer[0..tlv_len],
                         origin,
                         &mut self.tables,
-                        &mut self.content_store,
-                        &mut self.clock,
-                        &mut self.faces.faces,
-                    ) {
-                        let packet_len = tlv_len;
-                        if let Some(hop_byte_index) = index_of_hop_byte {
-                            recv_buffer[hop_byte_index] =
-                                recv_buffer[hop_byte_index].saturating_sub(1);
-                        }
-                        if let Some(new_nonce) = new_nonce {
-                            // TODO: we should set this nonce and possibly re-encode the whole packet
-                            //  as its size's size could have changed. But, could optimize too.
-                        }
-
-                        let name = Name::from_bytes(&recv_buffer[name_offset..*recv_buffer_cursor])
-                            .unwrap();
-                        Self::dispatch_interest(
-                            name,
-                            &recv_buffer[0..packet_len],
-                            origin,
-                            &mut self.tables,
-                            &mut self.faces.faces,
-                        );
-                    }
-                    any_processed = true;
-                } // Otherwise ignore the malformed packet
-            }
-            TLV_TYPE_DATA => {
-                // Handle data
-                if let Some(data) = Data::from_bytes(tlv.val) {
-                    Self::handle_data(
-                        data,
-                        &tlv.val,
-                        origin,
-                        &mut self.tables,
-                        &mut self.content_store,
+                        &mut self.metrics,
                         &mut self.clock,
                         &mut self.faces.faces,
                     );
                     any_processed = true;
-                } // Otherwise ignore the malformed packet
+                } else {
+                    // Otherwise ignore the malformed packet
+                    self.metrics.invalid_packet_received(origin);
+                }
             }
-            _ => {} // Otherwise we ignore the packet
+            TLV_TYPE_DATA => {
+                // Handle data
+                if let Some(data) = Data::try_decode(tlv.val) {
+                    Self::handle_data(
+                        data,
+                        &recv_buffer[0..tlv_len],
+                        origin,
+                        &mut self.tables,
+                        &mut self.metrics,
+                        &mut self.clock,
+                        &mut self.hasher,
+                        &mut self.faces.faces,
+                    );
+                    any_processed = true;
+                } else {
+                    // Otherwise ignore the malformed packet
+                    self.metrics.invalid_packet_received(origin);
+                }
+            }
+            _ => {
+                self.metrics.invalid_packet_received(origin);
+            } // Otherwise we ignore the packet
         }
 
         // Reset the cursor back by the size of the processed element
         if tlv_len < *recv_buffer_cursor {
-            // There are still some unprocessed bytes, so we want to loop again
+            // There are still some unprocessed bytes
             recv_buffer.copy_within(tlv_len..*recv_buffer_cursor, 0);
             *recv_buffer_cursor -= tlv_len;
         } else {
@@ -240,20 +252,29 @@ where
         Ok(any_processed)
     }
 
-    // Returns the modifications needed to the interest
-    // If Some, we should check for hop_limit and if the
-    //  inner oprion is Some, also set the new nonce
     fn handle_interest<'a>(
-        interest: Interest<'a>,
+        mut interest: Interest<'a>,
+        original_packet: &'a [u8],
         origin: FaceToken,
-        tables: &mut Tables,
-        content_store: &mut CS,
+        tables: &mut T,
+        metrics: &mut M,
         clock: &mut C,
         faces: &mut [(u32, FaceEntry)],
-    ) -> Option<(Option<usize>, Option<[u8; 4]>)> {
+    ) {
         // Interest must have a non-empty name
         if interest.name.component_count() == 0 {
-            return None;
+            metrics.interest_dropped(origin);
+            return;
+        };
+
+        // We drop all the interests without a nonce, since
+        //  we don't know which faces are local
+        let nonce = match interest.nonce {
+            Some(nonce) => nonce,
+            None => {
+                metrics.interest_dropped(origin);
+                return;
+            },
         };
 
         // We want to drop packets if they have hop limit of 0,
@@ -264,7 +285,8 @@ where
         let is_last_hop = match &interest.hop_limit {
             Some(hop) => {
                 if *hop == 0 {
-                    return None;
+                    metrics.interest_dropped(origin);
+                    return;
                 } else {
                     *hop == 1
                 }
@@ -272,102 +294,66 @@ where
             None => false,
         };
 
-        // We check the PIT before CS because it is smaller/faster
-        //  and if the interest is already there then we know we
-        //  could not have satisfied it from CS.
-
         let now = clock.now();
 
-        if !is_last_hop {
-            let deadline = match interest.interest_lifetime {
-                Some(ms) => now.adding(ms),
-                None => now.adding(DEFAULT_DEADLINE_INCREMENT_MS),
-            };
-
-            match tables.register_interest(
-                interest.name,
-                interest.can_be_prefix,
-                origin,
-                now,
-                RETRANSMISSION_PERIOD_MS,
-                deadline,
-                interest.nonce,
-            ) {
-                PrefixRegistrationResult::NewRegistration => {
-                    // This is the first time (in recent past) that we see this packet, forward through
-                }
-                PrefixRegistrationResult::PreviousFromSelf => {
-                    // We treat this as a retransmission and always send the packet forward
-                }
-                PrefixRegistrationResult::PreviousFromOthers(should_retransmit) => {
-                    // The PIT already has others applying, so we only forward if it was not too long ago
-                    if !should_retransmit {
-                        return None;
-                    }
-                }
-                PrefixRegistrationResult::DeadNonce => {
-                    // The interest likely looped, so we drop it
-                    return None;
-                }
-                PrefixRegistrationResult::InvalidName => {
-                    // The interest has an invalid name, so we drop it
-                    return None;
-                }
-            }
-        }
-
-        // Then we try to satisfy the interest from our local cache
-        let freshness_requirement = if interest.must_be_fresh {
-            Some(now)
-        } else {
-            None
-        };
-
-        if let Ok(Some(retrieved)) =
-            content_store.get(interest.name, interest.can_be_prefix, freshness_requirement)
-        {
+        // First we try to satisfy the interest from our local cache
+        if let Some(retrieved) = tables.get_data(
+            interest.name,
+            interest.can_be_prefix,
+            interest.must_be_fresh,
+            now,
+        ) {
             // The packet is found so we simply reply to the same face
             if let Some(index) = Faces::find_face(&faces, &origin) {
-                if let Err(FaceError::Disconnected) = faces[index].1.send(retrieved) {
-                    faces[index].1.should_close = true;
-                }
+                metrics.interest_satisfied(origin);
+                metrics.data_sent(origin);
+                faces[index].1.send_whole_packet(retrieved)
             }
-            return None;
+            return;
         }
 
-        // Finally, if this is not the last hop of the interest we try to forward it.
-        if !is_last_hop {
-            // If the interest is missing a nonce we should add one before forwarding
-            // But do not for now, since it requires re-encoding the interest
-            let mut new_nonce = None;
-            if interest.nonce.is_none() {
-                new_nonce = Some(tables.next_nonce());
-            }
-
-            let index_of_hop_byte = interest.index_of_hop_byte();
-
-            return Some((index_of_hop_byte, new_nonce));
+        // If this is the last hop for the interest we return, since we could only
+        //  try to satisfy it locally.
+        if is_last_hop {
+            metrics.interest_dropped(origin);
+            return;
         }
 
-        None
-    }
+        // We need to decrement the hop byte if it is present
+        let hop_value_and_byte_idx = match (
+            interest.hop_limit,
+            interest.index_of_hop_byte_in_encoded_tlv(),
+        ) {
+            (Some(v), Some(idx)) => {
+                let v = v.saturating_sub(1);
+                interest.hop_limit = Some(v);
+                Some((v, idx))
+            }
+            _ => None,
+        };
 
-    fn dispatch_interest<'a>(
-        name: Name<'a>,
-        original_packet: &'a [u8],
-        origin: FaceToken,
-        tables: &mut Tables,
-        faces: &mut [(u32, FaceEntry)],
-    ) {
-        // We now know we need to forward the interest, just need to check where to send it
-        // The strategy we use is basically multicast to all relevant faces, nothing complex.
-        for next_hop in tables.hops_for_name(name) {
+        for next_hop in tables.register_interest(
+            interest.name,
+            interest.can_be_prefix,
+            interest.interest_lifetime,
+            nonce,
+            origin,
+            now,
+        ) {
             // Never forward back to the same face
-            if next_hop != origin {
-                if let Some(index) = Faces::find_face(&faces, &next_hop) {
-                    if let Err(FaceError::Disconnected) = faces[index].1.send(&original_packet) {
-                        faces[index].1.should_close = true;
-                    }
+            if next_hop == origin {
+                continue;
+            }
+            if let Some(index) = Faces::find_face(&faces, &next_hop) {
+                metrics.interest_sent(next_hop);
+                if let Some((hop, idx)) = hop_value_and_byte_idx {
+                    // Use the original packet, but substituting the byte at index
+                    faces[index]
+                        .1
+                        .send_modified_packet(original_packet, &[(idx, idx + 1, &[hop])])
+                } else {
+                    // Use the original packet
+                    faces[index].1.send_whole_packet(&original_packet)
                 }
             }
         }
@@ -377,37 +363,46 @@ where
         data: Data<'a>,
         original_packet: &'a [u8],
         origin: FaceToken,
-        tables: &mut Tables,
-        content_store: &mut CS,
+        tables: &mut T,
+        metrics: &mut M,
         clock: &mut C,
+        hasher: &mut H,
         faces: &mut [(u32, FaceEntry)],
     ) {
         let mut is_unsolicited: bool = true;
 
         let now = clock.now();
 
-        let mut hasher = H::new();
-        // TODO: test this!!! Probably inside the tlv, not packet?
-        let range = data.signed_range_in_parent_tlv();
-        hasher.update(&original_packet[range.0..range.1]);
-        let digest = hasher.finalize().into_inner();
+        // We set up a way to compute the digest of the packet,
+        //  but only if actually needed.
+        let mut digest = None;
+        let mut digest_computation = || match digest {
+            Some(inner) => inner,
+            None => {
+                hasher.reset();
+                hasher.update(original_packet);
+                let inner = hasher.finalize().into_inner();
+                digest = Some(inner);
+                inner
+            }
+        };
 
         // First we try to find the interest in the PIT and send it to every
         //  requesting face other than the face we got it from.
-        for face in tables.satisfy_interests(data.name, digest, now) {
+        for face in tables.satisfy_interests(data.name, now, &mut digest_computation) {
             is_unsolicited = false;
             if face != origin {
                 if let Some(index) = Faces::find_face(&faces, &face) {
-                    if let Err(FaceError::Disconnected) = faces[index].1.send(original_packet) {
-                        faces[index].1.should_close = true;
-                    }
+                    metrics.interest_satisfied(face);
+                    metrics.data_sent(face);
+                    faces[index].1.send_whole_packet(original_packet)
                 }
             }
         }
 
-        // For security we should usually drop unsolictied,
-        //  but might want to, e.g. keep the ones coming from local faces.
+        // For security we should drop the unsolicited data
         if is_unsolicited {
+            metrics.data_dropped(origin);
             return;
         }
 
@@ -422,13 +417,9 @@ where
             .map(|mi| mi.freshness_period)
             .flatten()
             .unwrap_or(0);
-        let freshness_deadline = now.adding(freshness_period);
 
-        if let Err(err) =
-            content_store.insert(data.name, digest, freshness_deadline, original_packet)
-        {
-            // Handle CS error
-        }
+        let digest = digest_computation();
+        tables.insert_data(data.name, digest, freshness_period, now, original_packet)
     }
 }
 
@@ -486,9 +477,6 @@ impl Faces {
 
 const MAX_PACKET_SIZE: usize = 8800;
 
-const DEFAULT_DEADLINE_INCREMENT_MS: u64 = 4000; // 4 sec
-const RETRANSMISSION_PERIOD_MS: u64 = 1000; // 1 sec
-
 const TLV_TYPE_INTEREST: u32 = 5;
 const TLV_TYPE_DATA: u32 = 6;
 
@@ -507,19 +495,65 @@ impl FaceEntry {
         let bytes_received = self
             .receiver
             .try_recv(&mut recv_buffer[*recv_buffer_cursor..])?;
-        assert!(*recv_buffer_cursor + bytes_received <= MAX_PACKET_SIZE);
+        debug_assert!(*recv_buffer_cursor + bytes_received <= MAX_PACKET_SIZE);
         *recv_buffer_cursor += bytes_received;
         Ok(bytes_received)
     }
 
-    fn send(&mut self, packet: &[u8]) -> Result<(), FaceError> {
-        let len = packet.len();
-        let mut sent_so_far = 0;
-        while sent_so_far < len {
-            sent_so_far += self
-                .sender
-                .send(&packet[sent_so_far..(len - sent_so_far)])?;
+    fn send_whole_packet(&mut self, packet: &[u8]) {
+        if let Err(FaceError::Disconnected) = self.sender.write(&packet) {
+            self.should_close = true;
+            return;
         }
-        Ok(())
+        if let Err(FaceError::Disconnected) = self.sender.flush() {
+            self.should_close = true;
+            return;
+        }
+    }
+
+    fn send_modified_packet(
+        &mut self,
+        packet: &[u8],
+        ranges_and_replacements: &[(usize, usize, &[u8])],
+    ) {
+        let mut offset = 0;
+
+        for &(start, end, replacement) in ranges_and_replacements {
+            debug_assert!(start >= offset && end >= start);
+            if start > offset {
+                if let Err(FaceError::Disconnected) = self.sender.write(&packet[offset..start]) {
+                    self.should_close = true;
+                    return;
+                }
+            }
+            if let Err(FaceError::Disconnected) = self.sender.write(replacement) {
+                self.should_close = true;
+                return;
+            }
+            offset = end;
+        }
+
+        if offset < packet.len() {
+            if let Err(FaceError::Disconnected) = self.sender.write(&packet[offset..]) {
+                self.should_close = true;
+                return;
+            }
+        }
+
+        if let Err(FaceError::Disconnected) = self.sender.flush() {
+            self.should_close = true;
+            return;
+        }
+    }
+
+    fn send_encodable<E: Encode>(&mut self, encodable: &E) {
+        if let Err(FaceError::Disconnected) = encodable.encode(self.sender.as_mut()) {
+            self.should_close = true;
+            return;
+        }
+        if let Err(FaceError::Disconnected) = self.sender.flush() {
+            self.should_close = true;
+            return;
+        }
     }
 }

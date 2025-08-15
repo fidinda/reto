@@ -1,5 +1,7 @@
 use core::num::NonZeroU32;
 
+use crate::io::Write;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum VarintDecodingError {
     BufferTooShort,
@@ -22,18 +24,9 @@ pub enum DecodingError {
     },
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum EncodingError {
-    BufferTooShort,
-}
-
-pub trait Write {
-    fn write(&mut self, bytes: &[u8]) -> Result<(), EncodingError>;
-}
-
 pub trait Encode {
     fn encoded_length(&self) -> usize;
-    fn encode<W: Write>(&self, writer: &mut W) -> Result<(), EncodingError>;
+    fn encode<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error>;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -154,7 +147,7 @@ impl Encode for u64 {
         }
     }
 
-    fn encode<W: Write>(&self, writer: &mut W) -> Result<(), EncodingError> {
+    fn encode<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
         if *self <= 252 {
             writer.write(&[*self as u8])
         } else if *self <= 65535 {
@@ -176,7 +169,7 @@ impl<'a> Encode for TLV<'a> {
         (self.typ.get() as u64).encoded_length() + (l as u64).encoded_length() + l
     }
 
-    fn encode<W: Write>(&self, writer: &mut W) -> Result<(), EncodingError> {
+    fn encode<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
         (self.typ.get() as u64).encode(writer)?;
         (self.val.len() as u64).encode(writer)?;
         writer.write(&self.val)
@@ -187,11 +180,12 @@ impl<'a> Encode for TLV<'a> {
 mod tests {
     use core::num::NonZeroU32;
 
-    use crate::tlv::{DecodingError, Encode, EncodingError, VarintDecodingError, TLV};
+    use crate::tlv::{DecodingError, Encode, VarintDecodingError, TLV};
     use alloc::vec::Vec;
 
     impl super::Write for Vec<u8> {
-        fn write(&mut self, bytes: &[u8]) -> Result<(), EncodingError> {
+        type Error = ();
+        fn write(&mut self, bytes: &[u8]) -> Result<(), ()> {
             self.extend_from_slice(bytes);
             Ok(())
         }
@@ -202,14 +196,18 @@ mod tests {
         cursor: usize,
     }
 
+    #[derive(Copy, Clone, PartialEq, Eq, Debug)]
+    struct BufferTooShort {}
+
     impl<const N: usize> super::Write for SliceBuffer<N> {
-        fn write(&mut self, bytes: &[u8]) -> Result<(), EncodingError> {
+        type Error = BufferTooShort;
+        fn write(&mut self, bytes: &[u8]) -> Result<(), BufferTooShort> {
             if self.cursor + bytes.len() <= N {
                 self.bytes[self.cursor..(self.cursor + bytes.len())].copy_from_slice(bytes);
                 self.cursor += bytes.len();
                 return Ok(());
             }
-            Err(EncodingError::BufferTooShort)
+            Err(BufferTooShort {})
         }
     }
 
@@ -285,7 +283,7 @@ mod tests {
 
             match v.encoded_length() {
                 1 => {
-                    assert_eq!(v.encode(&mut s0), Err(EncodingError::BufferTooShort));
+                    assert_eq!(v.encode(&mut s0), Err(BufferTooShort {}));
                     assert_eq!(v.encode(&mut s1), Ok(()));
                     assert_eq!(v.encode(&mut s3), Ok(()));
                     assert_eq!(v.encode(&mut s4), Ok(()));
@@ -294,8 +292,8 @@ mod tests {
                     assert_eq!(v.encode(&mut s9), Ok(()));
                 }
                 3 => {
-                    assert_eq!(v.encode(&mut s0), Err(EncodingError::BufferTooShort));
-                    assert_eq!(v.encode(&mut s1), Err(EncodingError::BufferTooShort));
+                    assert_eq!(v.encode(&mut s0), Err(BufferTooShort {}));
+                    assert_eq!(v.encode(&mut s1), Err(BufferTooShort {}));
                     assert_eq!(v.encode(&mut s3), Ok(()));
                     assert_eq!(v.encode(&mut s4), Ok(()));
                     assert_eq!(v.encode(&mut s5), Ok(()));
@@ -303,21 +301,21 @@ mod tests {
                     assert_eq!(v.encode(&mut s9), Ok(()));
                 }
                 5 => {
-                    assert_eq!(v.encode(&mut s0), Err(EncodingError::BufferTooShort));
-                    assert_eq!(v.encode(&mut s1), Err(EncodingError::BufferTooShort));
-                    assert_eq!(v.encode(&mut s3), Err(EncodingError::BufferTooShort));
-                    assert_eq!(v.encode(&mut s4), Err(EncodingError::BufferTooShort));
+                    assert_eq!(v.encode(&mut s0), Err(BufferTooShort {}));
+                    assert_eq!(v.encode(&mut s1), Err(BufferTooShort {}));
+                    assert_eq!(v.encode(&mut s3), Err(BufferTooShort {}));
+                    assert_eq!(v.encode(&mut s4), Err(BufferTooShort {}));
                     assert_eq!(v.encode(&mut s5), Ok(()));
                     assert_eq!(v.encode(&mut s8), Ok(()));
                     assert_eq!(v.encode(&mut s9), Ok(()));
                 }
                 9 => {
-                    assert_eq!(v.encode(&mut s0), Err(EncodingError::BufferTooShort));
-                    assert_eq!(v.encode(&mut s1), Err(EncodingError::BufferTooShort));
-                    assert_eq!(v.encode(&mut s3), Err(EncodingError::BufferTooShort));
-                    assert_eq!(v.encode(&mut s4), Err(EncodingError::BufferTooShort));
-                    assert_eq!(v.encode(&mut s5), Err(EncodingError::BufferTooShort));
-                    assert_eq!(v.encode(&mut s8), Err(EncodingError::BufferTooShort));
+                    assert_eq!(v.encode(&mut s0), Err(BufferTooShort {}));
+                    assert_eq!(v.encode(&mut s1), Err(BufferTooShort {}));
+                    assert_eq!(v.encode(&mut s3), Err(BufferTooShort {}));
+                    assert_eq!(v.encode(&mut s4), Err(BufferTooShort {}));
+                    assert_eq!(v.encode(&mut s5), Err(BufferTooShort {}));
+                    assert_eq!(v.encode(&mut s8), Err(BufferTooShort {}));
                     assert_eq!(v.encode(&mut s9), Ok(()));
                 }
                 _ => panic!(),
@@ -365,7 +363,7 @@ mod tests {
                     bytes: [],
                     cursor: 0,
                 };
-                assert_eq!(tlv.encode(&mut s0), Err(EncodingError::BufferTooShort));
+                assert_eq!(tlv.encode(&mut s0), Err(BufferTooShort {}));
             }
         }
 

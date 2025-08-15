@@ -1,19 +1,27 @@
 use core::num::NonZeroU16;
 
-use crate::tlv::{Encode, EncodingError, Write, TLV};
-
-#[derive(Copy, Clone)]
-pub enum NameComponentType {
-    Generic,
-    ImplicitSha256Digest,
-    ParameterSha256Digest,
-    Other(NonZeroU16),
-}
+use crate::{
+    io::Write,
+    tlv::{Encode, TLV},
+};
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct NameComponent<'a> {
     pub typ: NonZeroU16,
     pub bytes: &'a [u8],
+}
+
+impl<'a> NameComponent<'a> {
+    pub const TYPE_GENERIC: u16 = 8;
+    pub const TYPE_IMPLICIT_SHA256: u16 = 1;
+    pub const TYPE_PARAMETER_SHA256: u16 = 2;
+
+    pub fn new(typ: u16, bytes: &'a [u8]) -> Option<Self> {
+        Some(Self {
+            typ: NonZeroU16::new(typ)?,
+            bytes,
+        })
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -22,27 +30,33 @@ pub struct Name<'a> {
 }
 
 impl<'a> Name<'a> {
+    pub const TLV_TYPE_NAME: u32 = 7;
+
     pub fn new() -> Self {
         Self {
             inner: NameInner::Empty,
         }
     }
 
-    pub(crate) fn from_bytes(component_bytes: &'a [u8]) -> Option<Self> {
+    pub fn try_decode(inner_bytes: &'a [u8]) -> Option<Self> {
         let mut component_count = 0;
         let mut offset = 0;
-        while offset < component_bytes.len() {
-            let (nc_tlv, nc_len) = TLV::try_decode(&component_bytes[offset..]).ok()?;
+        while offset < inner_bytes.len() {
+            let (nc_tlv, nc_len) = TLV::try_decode(&inner_bytes[offset..]).ok()?;
             let _: NonZeroU16 = nc_tlv.typ.try_into().ok()?;
             component_count += 1;
             offset += nc_len;
+        }
+
+        if offset != inner_bytes.len() {
+            return None;
         }
 
         let inner = if component_count == 0 {
             NameInner::Empty
         } else {
             NameInner::Buffer {
-                component_bytes,
+                component_bytes: inner_bytes,
                 component_count,
                 original_count: component_count,
             }
@@ -95,16 +109,6 @@ impl<'a> Name<'a> {
         }
     }
 
-    // TODO: make double-ended, maybe?
-    // Check https://doc.rust-lang.org/src/std/path.rs.html#1088-1090
-    // Maybe we can do the same for iteration?
-    // Could also pre-store the offsets of components, e.g. up to 4
-    // So you keep track of the path and when iterating you actually modify
-    // the path itself somehow (recreating the chain from scratch every time?)
-
-    // Or we could just always parse the path into a equivalent repr
-    // where the origin is always empty?
-    // Could we do that without allocations?
     pub fn components(&self) -> impl Iterator<Item = NameComponent<'a>> {
         let mut innermost_bytes = None;
         let mut innermost_count = 0;
@@ -185,7 +189,7 @@ impl<'a> Name<'a> {
         }
     }
 
-    fn component_encode<W: Write>(&self, writer: &mut W) -> Result<(), EncodingError> {
+    fn component_encode<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
         match self.inner {
             NameInner::Empty => Ok(()),
             NameInner::Buffer {
@@ -225,19 +229,17 @@ impl<'a> Name<'a> {
     }
 }
 
-const TLV_TYPE_NAME: u32 = 7;
-
 impl<'a> Encode for Name<'a> {
     fn encoded_length(&self) -> usize {
         let component_len = self.component_len();
-        (TLV_TYPE_NAME as u64).encoded_length()
+        (Name::TLV_TYPE_NAME as u64).encoded_length()
             + (component_len as u64).encoded_length()
             + component_len
     }
 
-    fn encode<W: Write>(&self, writer: &mut W) -> Result<(), EncodingError> {
+    fn encode<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
         let component_len = self.component_len();
-        (TLV_TYPE_NAME as u64).encode(writer)?;
+        (Name::TLV_TYPE_NAME as u64).encode(writer)?;
         (component_len as u64).encode(writer)?;
         self.component_encode(writer)
     }
@@ -290,7 +292,7 @@ impl<'a> Iterator for NameComponentIterator<'a> {
             None => {
                 //TODO: this is very much untested, probable off-by one errors
                 let mut depth = 0;
-                let mut nn = self.name;
+                let mut nn = &self.name;
                 let mut cc = None;
                 while depth < self.free_components {
                     depth += 1;
@@ -298,7 +300,7 @@ impl<'a> Iterator for NameComponentIterator<'a> {
                         NameInner::Component {
                             original,
                             component,
-                        } => (*original, Some(component)),
+                        } => (original, Some(component)),
                         _ => unreachable!(), // Because upon iterator creation we ensured the correct depth
                     };
                 }
@@ -306,48 +308,5 @@ impl<'a> Iterator for NameComponentIterator<'a> {
                 cc
             }
         }
-    }
-}
-
-impl From<NonZeroU16> for NameComponentType {
-    fn from(value: NonZeroU16) -> Self {
-        match value.get() {
-            NAME_COMPONENT_TYPE_GENERIC => NameComponentType::Generic,
-            NAME_COMPONENT_TYPE_IMPLICIT_SHA256 => NameComponentType::ImplicitSha256Digest,
-            NAME_COMPONENT_TYPE_PARAMETER_SHA256 => NameComponentType::ParameterSha256Digest,
-            v => NameComponentType::Other(v.try_into().unwrap()),
-        }
-    }
-}
-
-impl From<NameComponentType> for NonZeroU16 {
-    fn from(value: NameComponentType) -> Self {
-        match value {
-            NameComponentType::Generic => NAME_COMPONENT_TYPE_GENERIC.try_into().unwrap(),
-            NameComponentType::ImplicitSha256Digest => {
-                NAME_COMPONENT_TYPE_IMPLICIT_SHA256.try_into().unwrap()
-            }
-            NameComponentType::ParameterSha256Digest => {
-                NAME_COMPONENT_TYPE_PARAMETER_SHA256.try_into().unwrap()
-            }
-            NameComponentType::Other(v) => v,
-        }
-    }
-}
-
-const NAME_COMPONENT_TYPE_GENERIC: u16 = 8;
-const NAME_COMPONENT_TYPE_IMPLICIT_SHA256: u16 = 1;
-const NAME_COMPONENT_TYPE_PARAMETER_SHA256: u16 = 2;
-
-impl<'a> NameComponent<'a> {
-    pub fn new(typ: NameComponentType, bytes: &'a [u8]) -> Self {
-        Self {
-            typ: typ.into(),
-            bytes,
-        }
-    }
-
-    pub fn component_type(&self) -> NameComponentType {
-        self.typ.into()
     }
 }
