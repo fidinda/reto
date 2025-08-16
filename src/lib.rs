@@ -1,14 +1,14 @@
 #![no_std]
 extern crate alloc;
 
-mod clock;
-mod hash;
-mod io;
+pub mod clock;
+pub mod hash;
+pub mod io;
 
-mod tlv;
-mod name;
-mod packet;
+pub mod tlv;
+pub mod name;
+pub mod packet;
 
-mod face;
-mod tables;
-mod forwarder;
+pub mod face;
+pub mod tables;
+pub mod forwarder;

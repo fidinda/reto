@@ -809,3 +809,32 @@ const TLV_TYPE_SIGNATURE_KEY_LOCATOR: u32 = 29;
 const TLV_TYPE_SIGNATURE_NONCE: u32 = 38;
 const TLV_TYPE_SIGNATURE_TIME: u32 = 40;
 const TLV_TYPE_SIGNATURE_SEQ_NUM: u32 = 42;
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    fn test_key_locator() {}
+
+    #[test]
+    fn test_signature_info() {}
+
+    #[test]
+    fn test_interest_signature_info() {}
+
+    #[test]
+    fn test_meta_info() {}
+
+    #[test]
+    fn test_application_parameters() {}
+
+    #[test]
+    fn test_data() {
+        // Including hashing
+    }
+
+    #[test]
+    fn test_interest() {
+        // Including hashing
+    }
+}

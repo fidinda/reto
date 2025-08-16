@@ -22,6 +22,27 @@ impl<'a> NameComponent<'a> {
             bytes,
         })
     }
+
+    pub fn new_generic(bytes: &'a [u8]) -> Self {
+        Self {
+            typ: NonZeroU16::new(Self::TYPE_GENERIC).unwrap(),
+            bytes,
+        }
+    }
+
+    pub fn new_implicit(bytes: &'a [u8]) -> Self {
+        Self {
+            typ: NonZeroU16::new(Self::TYPE_IMPLICIT_SHA256).unwrap(),
+            bytes,
+        }
+    }
+
+    pub fn new_parameter(bytes: &'a [u8]) -> Self {
+        Self {
+            typ: NonZeroU16::new(Self::TYPE_PARAMETER_SHA256).unwrap(),
+            bytes,
+        }
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -144,9 +165,9 @@ impl<'a> Name<'a> {
                 *innermost_count = component_count;
                 *innermost_bytes = Some(&component_bytes);
             }
-            NameInner::Component { .. } => {
+            NameInner::Component { original, .. } => {
                 *free_components += 1;
-                self.compute_iter(innermost_bytes, innermost_count, free_components)
+                original.compute_iter(innermost_bytes, innermost_count, free_components)
             }
         }
     }
@@ -271,6 +292,9 @@ impl<'a> Iterator for NameComponentIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.innermost_remaining == 0 {
+            if self.free_components == 0 {
+                return None;
+            }
             self.innermost_bytes = None;
         }
 
@@ -290,7 +314,6 @@ impl<'a> Iterator for NameComponentIterator<'a> {
                 }
             }
             None => {
-                //TODO: this is very much untested, probable off-by one errors
                 let mut depth = 0;
                 let mut nn = &self.name;
                 let mut cc = None;
@@ -308,5 +331,343 @@ impl<'a> Iterator for NameComponentIterator<'a> {
                 cc
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        name::{Name, NameComponent},
+        tlv::{Encode, TLV},
+    };
+
+    #[test]
+    fn test_component() {
+        let comp = NameComponent::new_generic(b"Hello");
+        assert!(comp.typ.get() == NameComponent::TYPE_GENERIC);
+        assert!(comp.bytes == b"Hello");
+
+        let comp = NameComponent::new_implicit(b"");
+        assert!(comp.typ.get() == NameComponent::TYPE_IMPLICIT_SHA256);
+        assert!(comp.bytes == b"");
+
+        let comp = NameComponent::new_parameter(b"parpar");
+        assert!(comp.typ.get() == NameComponent::TYPE_PARAMETER_SHA256);
+        assert!(comp.bytes == b"parpar");
+
+        let comp = NameComponent::new(28, b"test");
+        assert!(comp.is_some());
+        let comp = comp.unwrap();
+        assert!(comp.typ.get() == 28);
+        assert!(comp.bytes == b"test");
+
+        let comp = NameComponent::new(0, b"none");
+        assert!(comp.is_none());
+    }
+
+    #[test]
+    fn test_basics() {
+        let name = Name::new();
+        assert_eq!(name.component_count(), 0);
+        assert!(name.components().next().is_none());
+
+        let name = name.adding_component(NameComponent::new_generic(b"Hello"));
+        assert_eq!(name.component_count(), 1);
+        let mut nc = name.components();
+        let comp = nc.next();
+        assert!(comp.is_some());
+        let comp = comp.unwrap();
+        assert!(comp.typ.get() == NameComponent::TYPE_GENERIC);
+        assert!(comp.bytes == b"Hello");
+        assert!(nc.next().is_none());
+
+        let name = name.adding_component(NameComponent::new_implicit(b"CAFECAFE"));
+        assert_eq!(name.component_count(), 2);
+        let mut nc = name.components();
+        let comp = nc.next();
+        assert!(comp.is_some());
+        let comp = comp.unwrap();
+        assert!(comp.typ.get() == NameComponent::TYPE_GENERIC);
+        assert!(comp.bytes == b"Hello");
+        let comp = nc.next();
+        assert!(comp.is_some());
+        let comp = comp.unwrap();
+        assert!(comp.typ.get() == NameComponent::TYPE_IMPLICIT_SHA256);
+        assert!(comp.bytes == b"CAFECAFE");
+        assert!(nc.next().is_none());
+
+        let name = name.dropping_last_component();
+        assert!(name.is_some());
+        let name = name.unwrap();
+        assert_eq!(name.component_count(), 1);
+        let mut nc = name.components();
+        let comp = nc.next();
+        assert!(comp.is_some());
+        let comp = comp.unwrap();
+        assert!(comp.typ.get() == NameComponent::TYPE_GENERIC);
+        assert!(comp.bytes == b"Hello");
+        assert!(nc.next().is_none());
+
+        let name = name.dropping_last_component();
+        assert!(name.is_some());
+        let name = name.unwrap();
+        assert_eq!(name.component_count(), 0);
+
+        let name = name.dropping_last_component();
+        assert!(name.is_none());
+    }
+
+    #[test]
+    fn test_decoding() {
+        let inner_bytes = &[];
+        let name = Name::try_decode(inner_bytes);
+        assert!(name.is_some());
+        let name = name.unwrap();
+        assert!(name.component_count() == 0);
+        assert!(name.components().next().is_none());
+
+        let inner_bytes = &[8, 0];
+        let name = Name::try_decode(inner_bytes);
+        assert!(name.is_some());
+        let name = name.unwrap();
+        assert!(name.component_count() == 1);
+        let mut nc = name.components();
+        let comp = nc.next();
+        assert!(comp.is_some());
+        let comp = comp.unwrap();
+        assert!(comp.typ.get() == NameComponent::TYPE_GENERIC);
+        assert!(comp.bytes == &[]);
+        assert!(nc.next().is_none());
+
+        let inner_bytes = &[8, 5, b'h', b'e', b'l', b'l', b'o'];
+        let name = Name::try_decode(inner_bytes);
+        assert!(name.is_some());
+        let name = name.unwrap();
+        assert!(name.component_count() == 1);
+        let mut nc = name.components();
+        let comp = nc.next();
+        assert!(comp.is_some());
+        let comp = comp.unwrap();
+        assert!(comp.typ.get() == NameComponent::TYPE_GENERIC);
+        assert!(comp.bytes == b"hello");
+        assert!(nc.next().is_none());
+
+        let name = name.dropping_last_component();
+        assert!(name.is_some());
+        let name = name.unwrap();
+        assert_eq!(name.component_count(), 0);
+
+        let name = name.dropping_last_component();
+        assert!(name.is_none());
+
+        let inner_bytes = &[
+            8, 5, b'h', b'e', b'l', b'l', b'o', 1, 5, b'w', b'o', b'r', b'l', b'd',
+        ];
+        let name = Name::try_decode(inner_bytes);
+        assert!(name.is_some());
+        let name = name.unwrap();
+        assert!(name.component_count() == 2);
+        let mut nc = name.components();
+        let comp = nc.next();
+        assert!(comp.is_some());
+        let comp = comp.unwrap();
+        assert!(comp.typ.get() == NameComponent::TYPE_GENERIC);
+        assert!(comp.bytes == b"hello");
+        let comp = nc.next();
+        assert!(comp.is_some());
+        let comp = comp.unwrap();
+        assert!(comp.typ.get() == NameComponent::TYPE_IMPLICIT_SHA256);
+        assert!(comp.bytes == b"world");
+        assert!(nc.next().is_none());
+
+        let name = name.adding_component(NameComponent::new_parameter(b"CAFECAFE"));
+        assert_eq!(name.component_count(), 3);
+        let mut nc = name.components();
+        let comp = nc.next();
+        assert!(comp.is_some());
+        let comp = comp.unwrap();
+        assert!(comp.typ.get() == NameComponent::TYPE_GENERIC);
+        assert!(comp.bytes == b"hello");
+        let comp = nc.next();
+        assert!(comp.is_some());
+        let comp = comp.unwrap();
+        assert!(comp.typ.get() == NameComponent::TYPE_IMPLICIT_SHA256);
+        assert!(comp.bytes == b"world");
+        let comp = nc.next();
+        assert!(comp.is_some());
+        let comp = comp.unwrap();
+        assert!(comp.typ.get() == NameComponent::TYPE_PARAMETER_SHA256);
+        assert!(comp.bytes == b"CAFECAFE");
+        assert!(nc.next().is_none());
+
+        let name = name.dropping_last_component();
+        assert!(name.is_some());
+        let name = name.unwrap();
+        assert_eq!(name.component_count(), 2);
+        let mut nc = name.components();
+        let comp = nc.next();
+        assert!(comp.is_some());
+        let comp = comp.unwrap();
+        assert!(comp.typ.get() == NameComponent::TYPE_GENERIC);
+        assert!(comp.bytes == b"hello");
+        let comp = nc.next();
+        assert!(comp.is_some());
+        let comp = comp.unwrap();
+        assert!(comp.typ.get() == NameComponent::TYPE_IMPLICIT_SHA256);
+        assert!(comp.bytes == b"world");
+        assert!(nc.next().is_none());
+
+        let name = name.dropping_last_component();
+        assert!(name.is_some());
+        let name = name.unwrap();
+        assert_eq!(name.component_count(), 1);
+        let mut nc = name.components();
+        let comp = nc.next();
+        assert!(comp.is_some());
+        let comp = comp.unwrap();
+        assert!(comp.typ.get() == NameComponent::TYPE_GENERIC);
+        assert!(comp.bytes == b"hello");
+        assert!(nc.next().is_none());
+
+        let name = name.adding_component(NameComponent::new_parameter(b"CAFECAFE"));
+        assert_eq!(name.component_count(), 2);
+        let mut nc = name.components();
+        let comp = nc.next();
+        assert!(comp.is_some());
+        let comp = comp.unwrap();
+        assert!(comp.typ.get() == NameComponent::TYPE_GENERIC);
+        assert!(comp.bytes == b"hello");
+        let comp = nc.next();
+        assert!(comp.is_some());
+        let comp = comp.unwrap();
+        assert!(comp.typ.get() == NameComponent::TYPE_PARAMETER_SHA256);
+        assert!(comp.bytes == b"CAFECAFE");
+        assert!(nc.next().is_none());
+
+        let name = name.dropping_last_component();
+        assert!(name.is_some());
+        let name = name.unwrap();
+        assert_eq!(name.component_count(), 1);
+        let mut nc = name.components();
+        let comp = nc.next();
+        assert!(comp.is_some());
+        let comp = comp.unwrap();
+        assert!(comp.typ.get() == NameComponent::TYPE_GENERIC);
+        assert!(comp.bytes == b"hello");
+        assert!(nc.next().is_none());
+
+        let name = name.dropping_last_component();
+        assert!(name.is_some());
+        let name = name.unwrap();
+        assert_eq!(name.component_count(), 0);
+
+        let name = name.dropping_last_component();
+        assert!(name.is_none());
+
+        let inner_bytes = &[
+            8, 5, b'h', b'e', b'l', b'l', b'o', 0, 5, b'w', b'o', b'r', b'l', b'd',
+        ];
+        let name = Name::try_decode(inner_bytes);
+        assert!(name.is_none());
+
+        let inner_bytes = &[
+            8, 5, b'h', b'e', b'l', b'l', b'o', 1, 6, b'w', b'o', b'r', b'l', b'd',
+        ];
+        let name = Name::try_decode(inner_bytes);
+        assert!(name.is_none());
+
+        let inner_bytes = &[
+            8, 5, b'h', b'e', b'l', b'l', b'o', 0, 5, b'w', b'o', b'r', b'l', b'd', 1,
+        ];
+        let name = Name::try_decode(inner_bytes);
+        assert!(name.is_none());
+
+        let inner_bytes = &[253, 251, 252, 0];
+        let name = Name::try_decode(inner_bytes);
+        assert!(name.is_some());
+        let name = name.unwrap();
+        assert!(name.component_count() == 1);
+        let mut nc = name.components();
+        let comp = nc.next();
+        assert!(comp.is_some());
+        let comp = comp.unwrap();
+        assert!(comp.typ.get() == u16::from_be_bytes([251, 252]));
+        assert!(comp.bytes == &[]);
+        assert!(nc.next().is_none());
+
+        let inner_bytes = &[254, 251, 252, 253, 254, 0];
+        let name = Name::try_decode(inner_bytes);
+        assert!(name.is_none());
+    }
+
+    use alloc::vec::Vec;
+
+    #[test]
+    fn test_encoding() {
+        let inner_bytes = &[
+            8, 5, b'h', b'e', b'l', b'l', b'o', 1, 5, b'w', b'o', b'r', b'l', b'd',
+        ];
+        let outer_bytes = &[
+            7, 14, 8, 5, b'h', b'e', b'l', b'l', b'o', 1, 5, b'w', b'o', b'r', b'l', b'd',
+        ];
+
+        let name = Name::try_decode(inner_bytes);
+        assert!(name.is_some());
+        let name = name.unwrap();
+        assert!(name.component_count() == 2);
+
+        let mut buf = Vec::new();
+        assert!(name.encoded_length() == outer_bytes.len());
+        let _ = name.encode(&mut buf);
+        assert!(buf.as_slice() == outer_bytes);
+
+        let tlv = TLV::try_decode(&buf);
+        assert!(tlv.is_ok());
+        let (tlv, tlv_len) = tlv.unwrap();
+        assert!(tlv_len == outer_bytes.len());
+        assert!(tlv.typ.get() == Name::TLV_TYPE_NAME);
+        assert!(tlv.val == inner_bytes);
+
+        let inner_bytes = &[
+            8, 5, b'h', b'e', b'l', b'l', b'o', 1, 5, b'w', b'o', b'r', b'l', b'd', 2, 8, b'C',
+            b'A', b'F', b'E', b'C', b'A', b'F', b'E',
+        ];
+        let outer_bytes = &[
+            7, 24, 8, 5, b'h', b'e', b'l', b'l', b'o', 1, 5, b'w', b'o', b'r', b'l', b'd', 2, 8,
+            b'C', b'A', b'F', b'E', b'C', b'A', b'F', b'E',
+        ];
+        let name = name.adding_component(NameComponent::new_parameter(b"CAFECAFE"));
+
+        let mut buf = Vec::new();
+        assert!(name.encoded_length() == outer_bytes.len());
+        let _ = name.encode(&mut buf);
+        assert!(buf.as_slice() == outer_bytes);
+
+        let tlv = TLV::try_decode(&buf);
+        assert!(tlv.is_ok());
+        let (tlv, tlv_len) = tlv.unwrap();
+        assert!(tlv_len == outer_bytes.len());
+        assert!(tlv.typ.get() == Name::TLV_TYPE_NAME);
+        assert!(tlv.val == inner_bytes);
+
+        let inner_bytes = &[8, 5, b'h', b'e', b'l', b'l', b'o'];
+        let outer_bytes = &[7, 7, 8, 5, b'h', b'e', b'l', b'l', b'o'];
+        let name = name
+            .dropping_last_component()
+            .unwrap()
+            .dropping_last_component()
+            .unwrap();
+
+        let mut buf = Vec::new();
+        assert!(name.encoded_length() == outer_bytes.len());
+        let _ = name.encode(&mut buf);
+        assert!(buf.as_slice() == outer_bytes);
+
+        let tlv = TLV::try_decode(&buf);
+        assert!(tlv.is_ok());
+        let (tlv, tlv_len) = tlv.unwrap();
+        assert!(tlv_len == outer_bytes.len());
+        assert!(tlv.typ.get() == Name::TLV_TYPE_NAME);
+        assert!(tlv.val == inner_bytes);
     }
 }

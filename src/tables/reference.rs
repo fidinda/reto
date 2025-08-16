@@ -509,7 +509,7 @@ impl TableEntry {
                 // Try for full name as well
                 let digest = digest_computation();
                 let component =
-                    NameComponent::new(NameComponent::TYPE_IMPLICIT_SHA256, &digest).unwrap();
+                    NameComponent::new_implicit(&digest);
                 let idx = if let Some(child) = self.get_child(component) {
                     child.0.satisfy_interests(
                         name,
@@ -559,7 +559,7 @@ impl TableEntry {
         } else {
             // We get to the implicit digest component
             let child = self.get_or_insert_child(
-                NameComponent::new(NameComponent::TYPE_IMPLICIT_SHA256, digest.as_slice()).unwrap(),
+                NameComponent::new_implicit(digest.as_slice()),
             );
             match child.data.as_mut() {
                 Some(entry) => {
