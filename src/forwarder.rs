@@ -8,7 +8,7 @@ use crate::{
     name::Name,
     packet::{Data, Interest},
     tables::Tables,
-    tlv::{DecodingError, Encode, VarintDecodingError, TLV},
+    tlv::{DecodingError, Encode, TlvEncode, VarintDecodingError, TLV},
 };
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -34,7 +34,7 @@ pub trait ForwarderMetrics {
 
     fn invalid_packet_received(&mut self, _from_face: FaceToken) {}
 
-    // TODO: probably count how many data from cache vs 
+    // TODO: probably count how many data from cache vs
     // TODO: add bytes
 }
 
@@ -60,7 +60,7 @@ where
     M: ForwarderMetrics,
     T: Tables,
 {
-    pub fn new(clock: C, hasher: H, metrics: M, tables: T,) -> Self {
+    pub fn new(clock: C, hasher: H, metrics: M, tables: T) -> Self {
         let faces = Faces::new();
 
         Self {
@@ -197,7 +197,7 @@ where
         // If we are here, we could process the full packet
         let mut any_processed = false;
         match tlv.typ.get() {
-            TLV_TYPE_INTEREST => {
+            Interest::TLV_TYPE => {
                 // Handle interest
                 if let Some(interest) = Interest::try_decode(tlv.val) {
                     Self::handle_interest(
@@ -215,7 +215,7 @@ where
                     self.metrics.invalid_packet_received(origin);
                 }
             }
-            TLV_TYPE_DATA => {
+            Data::TLV_TYPE => {
                 // Handle data
                 if let Some(data) = Data::try_decode(tlv.val) {
                     Self::handle_data(
@@ -270,11 +270,11 @@ where
         // We drop all the interests without a nonce, since
         //  we don't know which faces are local
         let nonce = match interest.nonce {
-            Some(nonce) => nonce,
+            Some(nonce) => nonce.bytes,
             None => {
                 metrics.interest_dropped(origin);
                 return;
-            },
+            }
         };
 
         // We want to drop packets if they have hop limit of 0,
@@ -284,11 +284,11 @@ where
         // If no hop limit is present we always accept the interest.
         let is_last_hop = match &interest.hop_limit {
             Some(hop) => {
-                if *hop == 0 {
+                if hop.val == 0 {
                     metrics.interest_dropped(origin);
                     return;
                 } else {
-                    *hop == 1
+                    hop.val == 1
                 }
             }
             None => false,
@@ -299,8 +299,8 @@ where
         // First we try to satisfy the interest from our local cache
         if let Some(retrieved) = tables.get_data(
             interest.name,
-            interest.can_be_prefix,
-            interest.must_be_fresh,
+            interest.can_be_prefix.is_some(),
+            interest.must_be_fresh.is_some(),
             now,
         ) {
             // The packet is found so we simply reply to the same face
@@ -320,22 +320,23 @@ where
         }
 
         // We need to decrement the hop byte if it is present
-        let hop_value_and_byte_idx = match (
-            interest.hop_limit,
-            interest.index_of_hop_byte_in_encoded_tlv(),
-        ) {
-            (Some(v), Some(idx)) => {
-                let v = v.saturating_sub(1);
-                interest.hop_limit = Some(v);
-                Some((v, idx))
+         let hop_value_and_byte_idx = if let Some(v) = interest.hop_limit.as_mut() {
+            v.val = v.val.saturating_sub(1);
+            let hop_val = v.val; 
+            if let Some(idx) = interest.index_of_hop_byte_in_encoded_tlv() {
+                Some((hop_val, idx))
+            } else {
+                None
             }
-            _ => None,
+        } else {
+            None
         };
 
+        let interest_lifetime = interest.interest_lifetime.map(|x| x.val);
         for next_hop in tables.register_interest(
             interest.name,
-            interest.can_be_prefix,
-            interest.interest_lifetime,
+            interest.can_be_prefix.is_some(),
+            interest_lifetime,
             nonce,
             origin,
             now,
@@ -416,6 +417,7 @@ where
             .meta_info
             .map(|mi| mi.freshness_period)
             .flatten()
+            .map(|fp| fp.val)
             .unwrap_or(0);
 
         let digest = digest_computation();
@@ -476,9 +478,6 @@ impl Faces {
 }
 
 const MAX_PACKET_SIZE: usize = 8800;
-
-const TLV_TYPE_INTEREST: u32 = 5;
-const TLV_TYPE_DATA: u32 = 6;
 
 struct FaceEntry {
     sender: Box<dyn FaceSender>,

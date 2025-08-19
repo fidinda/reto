@@ -2,7 +2,7 @@ use core::num::NonZeroU16;
 
 use crate::{
     io::Write,
-    tlv::{Encode, TLV},
+    tlv::{Encode, TlvEncode, TLV},
 };
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -15,6 +15,12 @@ impl<'a> NameComponent<'a> {
     pub const TYPE_GENERIC: u16 = 8;
     pub const TYPE_IMPLICIT_SHA256: u16 = 1;
     pub const TYPE_PARAMETER_SHA256: u16 = 2;
+    pub const TYPE_KEYWORD: u16 = 32;
+    pub const TYPE_SEGMENT: u16 = 50;
+    pub const TYPE_BYTE_OFFSET: u16 = 52;
+    pub const TYPE_VERSION_NAME: u16 = 54;
+    pub const TYPE_TIMESTAMP: u16 = 56;
+    pub const TYPE_SEQUENCE_NUM: u16 = 58;
 
     pub fn new(typ: u16, bytes: &'a [u8]) -> Option<Self> {
         Some(Self {
@@ -45,14 +51,22 @@ impl<'a> NameComponent<'a> {
     }
 }
 
+impl<'a> Encode for NameComponent<'a> {
+    fn encoded_length(&self) -> usize {
+        TLV { typ: self.typ.into(), val: self.bytes }.encoded_length()
+    }
+
+    fn encode<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
+        TLV { typ: self.typ.into(), val: self.bytes }.encode(writer)
+    }
+}
+
 #[derive(Copy, Clone)]
 pub struct Name<'a> {
     inner: NameInner<'a>,
 }
 
 impl<'a> Name<'a> {
-    pub const TLV_TYPE_NAME: u32 = 7;
-
     pub fn new() -> Self {
         Self {
             inner: NameInner::Empty,
@@ -172,7 +186,12 @@ impl<'a> Name<'a> {
         }
     }
 
-    fn component_len(&self) -> usize {
+}
+
+impl<'a> TlvEncode for Name<'a> {
+    const TLV_TYPE: u32 = 7;
+    
+    fn inner_length(&self) -> usize {
         match self.inner {
             NameInner::Empty => 0,
             NameInner::Buffer {
@@ -205,12 +224,12 @@ impl<'a> Name<'a> {
                     typ: component.typ.into(),
                     val: &component.bytes,
                 };
-                original.component_len() + tlv.encoded_length()
+                original.inner_length() + tlv.encoded_length()
             }
         }
     }
-
-    fn component_encode<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
+    
+    fn encode_inner<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
         match self.inner {
             NameInner::Empty => Ok(()),
             NameInner::Buffer {
@@ -239,7 +258,7 @@ impl<'a> Name<'a> {
                 original,
                 component,
             } => {
-                original.component_encode(writer)?;
+                original.encode_inner(writer)?;
                 let tlv = TLV {
                     typ: component.typ.into(),
                     val: &component.bytes,
@@ -247,22 +266,6 @@ impl<'a> Name<'a> {
                 tlv.encode(writer)
             }
         }
-    }
-}
-
-impl<'a> Encode for Name<'a> {
-    fn encoded_length(&self) -> usize {
-        let component_len = self.component_len();
-        (Name::TLV_TYPE_NAME as u64).encoded_length()
-            + (component_len as u64).encoded_length()
-            + component_len
-    }
-
-    fn encode<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
-        let component_len = self.component_len();
-        (Name::TLV_TYPE_NAME as u64).encode(writer)?;
-        (component_len as u64).encode(writer)?;
-        self.component_encode(writer)
     }
 }
 
@@ -338,7 +341,7 @@ impl<'a> Iterator for NameComponentIterator<'a> {
 mod tests {
     use crate::{
         name::{Name, NameComponent},
-        tlv::{Encode, TLV},
+        tlv::{Encode, TlvEncode, TLV},
     };
 
     #[test]
@@ -625,7 +628,7 @@ mod tests {
         assert!(tlv.is_ok());
         let (tlv, tlv_len) = tlv.unwrap();
         assert!(tlv_len == outer_bytes.len());
-        assert!(tlv.typ.get() == Name::TLV_TYPE_NAME);
+        assert!(tlv.typ.get() == Name::TLV_TYPE);
         assert!(tlv.val == inner_bytes);
 
         let inner_bytes = &[
@@ -647,7 +650,7 @@ mod tests {
         assert!(tlv.is_ok());
         let (tlv, tlv_len) = tlv.unwrap();
         assert!(tlv_len == outer_bytes.len());
-        assert!(tlv.typ.get() == Name::TLV_TYPE_NAME);
+        assert!(tlv.typ.get() == Name::TLV_TYPE);
         assert!(tlv.val == inner_bytes);
 
         let inner_bytes = &[8, 5, b'h', b'e', b'l', b'l', b'o'];
@@ -667,7 +670,7 @@ mod tests {
         assert!(tlv.is_ok());
         let (tlv, tlv_len) = tlv.unwrap();
         assert!(tlv_len == outer_bytes.len());
-        assert!(tlv.typ.get() == Name::TLV_TYPE_NAME);
+        assert!(tlv.typ.get() == Name::TLV_TYPE);
         assert!(tlv.val == inner_bytes);
     }
 }

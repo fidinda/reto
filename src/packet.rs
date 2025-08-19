@@ -2,19 +2,22 @@ use crate::{
     hash::Hasher,
     io::Write,
     name::{Name, NameComponent},
-    tlv::{Encode, TLV},
+    tlv::{Encode, TlvEncode, TypedArray, TypedBytes, TypedEmpty, TypedInteger, TLV},
 };
 use core::num::NonZeroU16;
 
 pub struct Interest<'a> {
     pub name: Name<'a>,
-    pub can_be_prefix: bool,
-    pub must_be_fresh: bool,
-    pub forwarding_hint: Option<&'a [u8]>,
-    pub nonce: Option<[u8; 4]>,
-    pub interest_lifetime: Option<u64>,
-    pub hop_limit: Option<u8>,
-    pub application_parameters: Option<ApplicationParameters<'a>>,
+    pub can_be_prefix: Option<CanBePrefix>,
+    pub must_be_fresh: Option<MustBeFresh>,
+    pub forwarding_hint: Option<ForwardingHint<'a>>,
+    pub nonce: Option<InterestNonce>,
+    pub interest_lifetime: Option<InterestLifetime>,
+    pub hop_limit: Option<HopLimit>,
+    pub application_parameters: Option<(
+        ApplicationParameters<'a>,
+        Option<(InterestSignatureInfo<'a>, InterestSignatureValue<'a>)>,
+    )>,
 
     // The specification allows for any number of TLVs that are not currently known,
     //  but that should still be preserved.
@@ -30,7 +33,7 @@ impl<'a> Interest<'a> {
         let mut offset = 0;
 
         let (name_tlv, name_len) = TLV::try_decode(&inner_bytes[offset..]).ok()?;
-        if name_tlv.typ.get() != Name::TLV_TYPE_NAME {
+        if name_tlv.typ.get() != Name::TLV_TYPE {
             return None; // Name must be the first TLV
         }
         offset += name_len;
@@ -39,8 +42,8 @@ impl<'a> Interest<'a> {
         // The rest should typically be a few known TLVs in order,
         //  but they may contain arbitrary non-critical TLVs too.
         // We store those as byte ranges each of which can contain zero or more TLVs.
-        let mut can_be_prefix = false;
-        let mut must_be_fresh = false;
+        let mut can_be_prefix = None;
+        let mut must_be_fresh = None;
         let mut forwarding_hint = None;
         let mut nonce = None;
         let mut interest_lifetime = None;
@@ -49,13 +52,13 @@ impl<'a> Interest<'a> {
         let mut unknown_tlv_ranges = [(0usize, 0usize); 7];
 
         let known = [
-            TLV_TYPE_CAN_BE_PREFIX,
-            TLV_TYPE_MUST_BE_FRESH,
-            TLV_TYPE_FORWARDING_HINT,
-            TLV_TYPE_NONCE,
-            TLV_TYPE_INTEREST_LIFETIME,
-            TLV_TYPE_HOP_LIMIT,
-            TLV_TYPE_APPLICATION_PARAMETERS,
+            CanBePrefix::TLV_TYPE,
+            MustBeFresh::TLV_TYPE,
+            ForwardingHint::TLV_TYPE,
+            InterestNonce::TLV_TYPE,
+            InterestLifetime::TLV_TYPE,
+            HopLimit::TLV_TYPE,
+            ApplicationParameters::TLV_TYPE,
         ];
         let mut minimum_possible_known = 0;
 
@@ -69,13 +72,25 @@ impl<'a> Interest<'a> {
                 }
 
                 match idx {
-                    0 => can_be_prefix = true,
-                    1 => must_be_fresh = true,
-                    2 => forwarding_hint = Some(tlv.val),
-                    3 => nonce = Some(tlv.val.try_into().ok()?),
-                    4 => interest_lifetime = Some(tlv.val_as_u64()?),
-                    5 => hop_limit = Some(tlv.val_as_u64()? as u8),
-                    6 => application_parameters = Some(ApplicationParameters::try_decode(tlv.val)?),
+                    0 => can_be_prefix = Some(CanBePrefix {}),
+                    1 => must_be_fresh = Some(MustBeFresh {}),
+                    2 => forwarding_hint = Some(ForwardingHint { bytes: tlv.val }),
+                    3 => {
+                        nonce = Some(InterestNonce {
+                            bytes: tlv.val.try_into().ok()?,
+                        })
+                    }
+                    4 => {
+                        interest_lifetime = Some(InterestLifetime {
+                            val: tlv.val_as_u64()?,
+                        })
+                    }
+                    5 => {
+                        hop_limit = Some(HopLimit {
+                            val: tlv.val_as_u64()?.try_into().ok()?,
+                        })
+                    }
+                    6 => application_parameters = Some(ApplicationParameters { bytes: tlv.val }),
                     _ => unreachable!(),
                 }
                 minimum_possible_known = idx;
@@ -99,6 +114,32 @@ impl<'a> Interest<'a> {
 
         let unknown_tlvs = unknown_tlv_ranges.map(|(b, e)| &inner_bytes[b..e]);
 
+        let application_parameters = match application_parameters {
+            Some(ap) => {
+                // There can be an optional signature here
+                let mut signature = None;
+                if offset < inner_bytes.len() {
+                    let (si_tlv, si_len) = TLV::try_decode(&inner_bytes[offset..]).ok()?;
+                    if si_tlv.typ.get() != InterestSignatureInfo::TLV_TYPE {
+                        return None;
+                    }
+                    let si = InterestSignatureInfo::try_decode(si_tlv.val)?;
+                    offset += si_len;
+                    let (sv_tlv, sv_len) = TLV::try_decode(&inner_bytes[offset..]).ok()?;
+                    if sv_tlv.typ.get() != InterestSignatureValue::TLV_TYPE {
+                        return None;
+                    }
+                    let sv = InterestSignatureValue { bytes: sv_tlv.val };
+                    if offset + sv_len != inner_bytes.len() {
+                        return None;
+                    }
+                    signature = Some((si, sv))
+                }
+                Some((ap, signature))
+            }
+            None => None,
+        };
+
         Some(Interest {
             name,
             can_be_prefix,
@@ -112,7 +153,7 @@ impl<'a> Interest<'a> {
         })
     }
 
-    pub fn hash_signed_portion<const N: usize, H: Hasher<N>>(&self, hasher: &mut H) {
+    pub fn hash_signed_portion<const N: usize, H: Hasher<N>>(&self, hasher: &mut H) -> bool {
         let mut relevant_name = self.name;
         if let Some(last_component) = relevant_name.components().last() {
             if last_component.typ.get() == NameComponent::TYPE_PARAMETER_SHA256 {
@@ -122,104 +163,99 @@ impl<'a> Interest<'a> {
 
         let mut hh = crate::hash::EncodedHasher { hasher };
         let _ = relevant_name.encode(&mut hh);
+
+        let (application_parameters, signature_info) = match self.application_parameters.as_ref() {
+            Some((ap, signature)) => match signature {
+                Some((signature_info, _)) => (ap, signature_info),
+                None => return false,
+            },
+            None => return false,
+        };
+
+        let _ = application_parameters.encode(&mut hh);
+        let _ = signature_info.encode(&mut hh);
+
+        true
     }
 
     pub(crate) fn index_of_hop_byte_in_encoded_tlv(&self) -> Option<usize> {
-        todo!()
+        if self.hop_limit.is_none() {
+            return None;
+        }
+
+        let mut len = (self.encoded_length() as u64).encoded_length()
+            + (Self::TLV_TYPE as u64).encoded_length();
+        len += self.unknown_tlvs[0].len();
+        len += self.can_be_prefix.encoded_length();
+        len += self.unknown_tlvs[1].len();
+        len += self.must_be_fresh.encoded_length();
+        len += self.unknown_tlvs[2].len();
+        len += self.forwarding_hint.encoded_length();
+        len += self.unknown_tlvs[3].len();
+        len += self.nonce.encoded_length();
+        len += self.unknown_tlvs[4].len();
+        len += self.interest_lifetime.encoded_length();
+        len += self.unknown_tlvs[5].len();
+        len += (HopLimit::TLV_TYPE as u64).encoded_length() + 1; // only adding T and L for hop limit
+
+        Some(len)
     }
 }
 
-impl<'a> Encode for Interest<'a> {
-    fn encoded_length(&self) -> usize {
+impl<'a> TlvEncode for Interest<'a> {
+    const TLV_TYPE: u32 = 5;
+
+    fn inner_length(&self) -> usize {
         let mut len = self.name.encoded_length();
         len += self.unknown_tlvs[0].len();
-        if self.can_be_prefix {
-            len += (TLV_TYPE_CAN_BE_PREFIX as u64).encoded_length() + 0u64.encoded_length();
-        }
+        len += self.can_be_prefix.encoded_length();
         len += self.unknown_tlvs[1].len();
-        if self.must_be_fresh {
-            len += (TLV_TYPE_MUST_BE_FRESH as u64).encoded_length() + 0u64.encoded_length();
-        }
+        len += self.must_be_fresh.encoded_length();
         len += self.unknown_tlvs[2].len();
-        if let Some(forwarding_hint) = &self.forwarding_hint {
-            len += (TLV_TYPE_FORWARDING_HINT as u64).encoded_length()
-                + (forwarding_hint.len() as u64).encoded_length()
-                + forwarding_hint.len();
-        }
+        len += self.forwarding_hint.encoded_length();
         len += self.unknown_tlvs[3].len();
-        if let Some(nonce) = &self.nonce {
-            len += (TLV_TYPE_NONCE as u64).encoded_length()
-                + (nonce.len() as u64).encoded_length()
-                + nonce.len();
-        }
+        len += self.nonce.encoded_length();
         len += self.unknown_tlvs[4].len();
-        if let Some(interest_lifetime) = &self.interest_lifetime {
-            len += (TLV_TYPE_INTEREST_LIFETIME as u64).encoded_length()
-                + interest_lifetime.encoded_length();
-        }
+        len += self.interest_lifetime.encoded_length();
         len += self.unknown_tlvs[5].len();
-        if let Some(_hop_limit) = &self.hop_limit {
-            len += (TLV_TYPE_HOP_LIMIT as u64).encoded_length() + 1 + 1;
-        }
+        len += self.hop_limit.encoded_length();
         len += self.unknown_tlvs[6].len();
-        if let Some(application_parameters) = &self.application_parameters {
-            len += application_parameters.encoded_length();
-        }
-        (TLV_TYPE_INTEREST as u64).encoded_length() + (len as u64).encoded_length() + len
+        len += self.application_parameters.encoded_length();
+        len
     }
 
-    fn encode<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
-        let len = self.encoded_length();
-        (TLV_TYPE_INTEREST as u64).encode(writer)?;
-        (len as u64).encode(writer)?;
+    fn encode_inner<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
         self.name.encode(writer)?;
         writer.write(self.unknown_tlvs[0])?;
-        if self.can_be_prefix {
-            (TLV_TYPE_CAN_BE_PREFIX as u64).encode(writer)?;
-            0u64.encode(writer)?;
-        }
+        self.can_be_prefix.encode(writer)?;
         writer.write(self.unknown_tlvs[1])?;
-        if self.must_be_fresh {
-            (TLV_TYPE_MUST_BE_FRESH as u64).encode(writer)?;
-            0u64.encode(writer)?;
-        }
+        self.must_be_fresh.encode(writer)?;
         writer.write(self.unknown_tlvs[2])?;
-        if let Some(forwarding_hint) = &self.forwarding_hint {
-            (TLV_TYPE_FORWARDING_HINT as u64).encode(writer)?;
-            (forwarding_hint.len() as u64).encode(writer)?;
-            writer.write(forwarding_hint)?;
-        }
+        self.forwarding_hint.encode(writer)?;
         writer.write(self.unknown_tlvs[3])?;
-        if let Some(nonce) = &self.nonce {
-            (TLV_TYPE_NONCE as u64).encode(writer)?;
-            (nonce.len() as u64).encode(writer)?;
-            writer.write(nonce)?;
-        }
+        self.nonce.encode(writer)?;
         writer.write(self.unknown_tlvs[4])?;
-        if let Some(interest_lifetime) = &self.interest_lifetime {
-            (TLV_TYPE_INTEREST_LIFETIME as u64).encode(writer)?;
-            interest_lifetime.encode(writer)?;
-        }
+        self.interest_lifetime.encode(writer)?;
         writer.write(self.unknown_tlvs[5])?;
-        if let Some(hop_limit) = &self.hop_limit {
-            (TLV_TYPE_HOP_LIMIT as u64).encode(writer)?;
-            1u64.encode(writer)?;
-            (*hop_limit as u64).encode(writer)?;
-        }
+        self.hop_limit.encode(writer)?;
         writer.write(self.unknown_tlvs[6])?;
-        if let Some(application_parameters) = &self.application_parameters {
-            application_parameters.encode(writer)?;
-        }
-        Ok(())
+        self.application_parameters.encode(writer)
     }
 }
+
+pub type CanBePrefix = TypedEmpty<33>;
+pub type MustBeFresh = TypedEmpty<18>;
+pub type ForwardingHint<'a> = TypedBytes<'a, 30>;
+pub type InterestNonce = TypedArray<10, 4>;
+pub type InterestLifetime = TypedInteger<12, u64>;
+pub type HopLimit = TypedInteger<34, u8>;
 
 pub struct Data<'a> {
     pub name: Name<'a>,
     pub meta_info: Option<MetaInfo<'a>>,
-    pub content: Option<&'a [u8]>,
+    pub content: Option<Content<'a>>,
     pub signature_info: SignatureInfo<'a>,
-    pub signature_value: &'a [u8],
+    pub signature_value: SignatureValue<'a>,
 
     // The specification allows for any number of TLVs that are not currently known,
     //  but that should still be preserved.
@@ -235,7 +271,7 @@ impl<'a> Data<'a> {
         let mut offset = 0;
 
         let (name_tlv, name_len) = TLV::try_decode(&inner_bytes[offset..]).ok()?;
-        if name_tlv.typ.get() != Name::TLV_TYPE_NAME {
+        if name_tlv.typ.get() != Name::TLV_TYPE {
             return None; // Name must be the first TLV
         }
         offset += name_len;
@@ -251,10 +287,10 @@ impl<'a> Data<'a> {
         let mut unknown_tlv_ranges = [(0usize, 0usize); 3];
 
         let known = [
-            TLV_TYPE_META_INFO,
-            TLV_TYPE_CONTENT,
-            TLV_TYPE_SIGNATURE_INFO,
-            TLV_TYPE_SIGNATURE_VALUE,
+            MetaInfo::TLV_TYPE,
+            Content::TLV_TYPE,
+            SignatureInfo::TLV_TYPE,
+            SignatureValue::TLV_TYPE,
         ];
         let mut minimum_possible_known = 0;
 
@@ -269,9 +305,9 @@ impl<'a> Data<'a> {
 
                 match idx {
                     0 => meta_info = Some(MetaInfo::try_decode(tlv.val)?),
-                    1 => content = Some(tlv.val),
+                    1 => content = Some(Content { bytes: tlv.val }),
                     2 => signature_info = Some(SignatureInfo::try_decode(tlv.val)?),
-                    3 => signature_value = Some(tlv.val),
+                    3 => signature_value = Some(SignatureValue { bytes: tlv.val }),
                     _ => unreachable!(),
                 }
                 minimum_possible_known = idx;
@@ -318,9 +354,7 @@ impl<'a> Data<'a> {
         }
         len += self.unknown_tlvs[1].len();
         if let Some(content) = &self.content {
-            (TLV_TYPE_CONTENT as u64).encoded_length();
-            (content.len() as u64).encoded_length();
-            len += content.len();
+            len += content.encoded_length();
         }
         len += self.unknown_tlvs[2].len();
         len + self.signature_info.encoded_length()
@@ -339,126 +373,38 @@ impl<'a> Data<'a> {
         }
         writer.write(self.unknown_tlvs[1])?;
         if let Some(content) = &self.content {
-            (TLV_TYPE_CONTENT as u64).encode(writer)?;
-            (content.len() as u64).encode(writer)?;
-            writer.write(content)?;
+            content.encode(writer)?;
         }
         writer.write(self.unknown_tlvs[2])?;
         self.signature_info.encode(writer)
     }
 }
 
-impl<'a> Encode for Data<'a> {
-    fn encoded_length(&self) -> usize {
-        let mut len = self.length_of_signed_portion();
-        len += (TLV_TYPE_SIGNATURE_VALUE as u64).encoded_length();
-        (self.signature_value.len() as u64).encoded_length();
-        len += self.signature_value.len();
-        (TLV_TYPE_DATA as u64).encoded_length() + (len as u64).encoded_length() + len
+impl<'a> TlvEncode for Data<'a> {
+    const TLV_TYPE: u32 = 6;
+
+    fn inner_length(&self) -> usize {
+        self.length_of_signed_portion() + self.signature_value.encoded_length()
     }
 
-    fn encode<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
-        let len = self.encoded_length();
-        (TLV_TYPE_DATA as u64).encode(writer)?;
-        (len as u64).encode(writer)?;
+    fn encode_inner<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
         self.encode_signed_portion(writer)?;
-        (TLV_TYPE_SIGNATURE_VALUE as u64).encode(writer)?;
-        (self.signature_value.len() as u64).encode(writer)?;
-        writer.write(self.signature_value)
+        self.signature_value.encode(writer)
     }
 }
 
-pub struct ApplicationParameters<'a> {
-    pub payload: &'a [u8],
-    pub signature: Option<(InterestSignatureInfo<'a>, &'a [u8])>,
-}
+pub type Content<'a> = TypedBytes<'a, 21>;
 
-impl<'a> ApplicationParameters<'a> {
-    pub fn try_decode(inner_bytes: &'a [u8]) -> Option<Self> {
-        let (inner_tlv, inner_len) = TLV::try_decode(inner_bytes).ok()?;
-        if inner_tlv.typ.get() != TLV_TYPE_APPLICATION_PARAMETERS {
-            return None;
-        }
-        let payload = inner_tlv.val;
-        let mut signature = None;
-        if inner_len < inner_bytes.len() {
-            let mut offset = inner_len;
-            let (si_tlv, si_len) = TLV::try_decode(&inner_bytes[offset..]).ok()?;
-            if si_tlv.typ.get() != TLV_TYPE_INTEREST_SIGNATURE_INFO {
-                return None;
-            }
-            let si = InterestSignatureInfo::try_decode(si_tlv.val)?;
-            offset += si_len;
-            let (sv_tlv, sv_len) = TLV::try_decode(&inner_bytes[offset..]).ok()?;
-            if sv_tlv.typ.get() != TLV_TYPE_INTEREST_SIGNATURE_VALUE {
-                return None;
-            }
-            if offset + sv_len != inner_bytes.len() {
-                return None;
-            }
-            signature = Some((si, si_tlv.val))
-        }
-
-        Some(Self { payload, signature })
-    }
-
-    pub fn hash_signed_portion<const N: usize, H: Hasher<N>>(&self, hasher: &mut H) {
-        let signature_info = match &self.signature {
-            Some((signature_info, _)) => signature_info,
-            None => return,
-        };
-
-        let mut hh = crate::hash::EncodedHasher { hasher };
-        let _ = (TLV_TYPE_APPLICATION_PARAMETERS as u64).encode(&mut hh);
-        let _ = (self.payload.len() as u64).encode(&mut hh);
-        let _ = hh.write(self.payload);
-        let _ = signature_info.encode(&mut hh);
-    }
-}
-
-impl<'a> Encode for ApplicationParameters<'a> {
-    fn encoded_length(&self) -> usize {
-        let mut len = (TLV_TYPE_APPLICATION_PARAMETERS as u64).encoded_length()
-            + (self.payload.len() as u64).encoded_length()
-            + self.payload.len();
-
-        if let Some(signature) = &self.signature {
-            len += signature.0.encoded_length();
-            len += (TLV_TYPE_INTEREST_SIGNATURE_VALUE as u64).encoded_length()
-                + (signature.1.len() as u64).encoded_length()
-                + signature.1.len();
-        }
-
-        len
-    }
-
-    fn encode<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
-        (TLV_TYPE_APPLICATION_PARAMETERS as u64).encode(writer)?;
-        (self.payload.len() as u64).encode(writer)?;
-        writer.write(self.payload)?;
-        if let Some(signature) = &self.signature {
-            signature.0.encode(writer)?;
-            (TLV_TYPE_INTEREST_SIGNATURE_VALUE as u64).encode(writer)?;
-            (signature.1.len() as u64).encode(writer)?;
-            writer.write(signature.1)?;
-        }
-        Ok(())
-    }
-}
+pub type ApplicationParameters<'a> = TypedBytes<'a, 36>;
 
 pub struct MetaInfo<'a> {
-    pub content_type: Option<u64>,
-    pub freshness_period: Option<u64>,
-    pub final_block_id: Option<NameComponent<'a>>,
+    pub content_type: Option<ContentType>,
+    pub freshness_period: Option<FreshnessPeriod>,
+    pub final_block_id: Option<FinalBlockId<'a>>,
     pub unknown_tlvs: &'a [u8], // Allow arbitrary TLVs after the original ones
 }
 
 impl<'a> MetaInfo<'a> {
-    pub const CONTENT_TYPE_BLOB: u64 = 0;
-    pub const CONTENT_TYPE_KEY: u64 = 1;
-    pub const CONTENT_TYPE_LINK: u64 = 2;
-    pub const CONTENT_TYPE_NACK: u64 = 3;
-
     pub fn try_decode(inner_bytes: &'a [u8]) -> Option<Self> {
         let mut content_type = None;
         let mut freshness_period = None;
@@ -469,29 +415,27 @@ impl<'a> MetaInfo<'a> {
         while offset < inner_bytes.len() {
             let (inner_tlv, inner_len) = TLV::try_decode(&inner_bytes[offset..]).ok()?;
             match inner_tlv.typ.get() {
-                TLV_TYPE_META_INFO_CONTENT_TYPE => {
+                ContentType::TLV_TYPE => {
                     if unknown_tlv_range.is_some() {
                         return None;
                     }
-                    content_type = Some(inner_tlv.val_as_u64()?.into())
+                    content_type = Some(ContentType {
+                        val: inner_tlv.val_as_u64()?,
+                    })
                 }
-                TLV_TYPE_META_INFO_FRESHNESS_PERIOD => {
+                FreshnessPeriod::TLV_TYPE => {
                     if unknown_tlv_range.is_some() {
                         return None;
                     }
-                    freshness_period = Some(inner_tlv.val_as_u64()?)
+                    freshness_period = Some(FreshnessPeriod {
+                        val: inner_tlv.val_as_u64()?,
+                    })
                 }
-                TLV_TYPE_META_INFO_FINAL_BLOCK_ID => {
+                FinalBlockId::TLV_TYPE => {
                     if unknown_tlv_range.is_some() {
                         return None;
                     }
-                    if let Ok((nc_tlv, _)) = TLV::try_decode(inner_tlv.val) {
-                        let typ: NonZeroU16 = nc_tlv.typ.try_into().ok()?;
-                        final_block_id = Some(NameComponent {
-                            typ,
-                            bytes: nc_tlv.val,
-                        })
-                    }
+                    final_block_id = Some(FinalBlockId::try_decode(inner_tlv.val)?)
                 }
                 _ => match &mut unknown_tlv_range {
                     Some(unknown_tlv_range) => (*unknown_tlv_range).1 += inner_len,
@@ -515,88 +459,102 @@ impl<'a> MetaInfo<'a> {
     }
 }
 
-impl<'a> Encode for MetaInfo<'a> {
-    fn encoded_length(&self) -> usize {
+impl<'a> TlvEncode for MetaInfo<'a> {
+    const TLV_TYPE: u32 = 20;
+
+    fn inner_length(&self) -> usize {
         let mut len = 0;
         if let Some(ct) = self.content_type {
-            let ct: u64 = ct.into();
-            let ctl = ct.encoded_length();
-            len += (TLV_TYPE_META_INFO_CONTENT_TYPE as u64).encoded_length();
-            len += (ctl as u64).encoded_length();
             len += ct.encoded_length();
         }
         if let Some(freshness_period) = self.freshness_period {
-            len += (TLV_TYPE_META_INFO_FRESHNESS_PERIOD as u64).encoded_length();
-            len += (freshness_period as u64).encoded_length();
             len += freshness_period.encoded_length();
         }
         if let Some(final_block_id) = self.final_block_id {
-            let tlv = TLV {
-                typ: final_block_id.typ.into(),
-                val: final_block_id.bytes,
-            };
-            let nc_len = tlv.encoded_length();
-            len += (TLV_TYPE_META_INFO_FINAL_BLOCK_ID as u64).encoded_length()
-                + (nc_len as u64).encoded_length()
-                + nc_len;
+            len += final_block_id.encoded_length();
         }
         len + self.unknown_tlvs.len()
     }
 
-    fn encode<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
-        (TLV_TYPE_META_INFO as u64).encode(writer)?;
-        let encoded_len = self.encoded_length();
-        (encoded_len as u64).encode(writer)?;
+    fn encode_inner<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
         if let Some(ct) = self.content_type {
-            (TLV_TYPE_META_INFO_CONTENT_TYPE as u64).encode(writer)?;
-            let ct: u64 = ct.into();
-            (ct.encoded_length() as u64).encode(writer)?;
             ct.encode(writer)?;
         }
         if let Some(freshness_period) = self.freshness_period {
-            (TLV_TYPE_META_INFO_FRESHNESS_PERIOD as u64).encode(writer)?;
-            (freshness_period.encoded_length() as u64).encode(writer)?;
             freshness_period.encode(writer)?;
         }
         if let Some(final_block_id) = self.final_block_id {
-            let tlv = TLV {
-                typ: final_block_id.typ.into(),
-                val: final_block_id.bytes,
-            };
-            let nc_len = tlv.encoded_length();
-            (TLV_TYPE_META_INFO_FINAL_BLOCK_ID as u64).encode(writer)?;
-            (nc_len as u64).encode(writer)?;
-            tlv.encode(writer)?;
+            final_block_id.encode(writer)?;
         }
         writer.write(self.unknown_tlvs)
     }
 }
 
+pub type ContentType = TypedInteger<24, u64>;
+
+impl ContentType {
+    pub const BLOB: u64 = 0;
+    pub const KEY: u64 = 1;
+    pub const LINK: u64 = 2;
+    pub const NACK: u64 = 3;
+}
+
+pub type FreshnessPeriod = TypedInteger<25, u64>;
+
+#[derive(Clone, Copy)]
+pub struct FinalBlockId<'a> {
+    pub component: NameComponent<'a>,
+}
+
+impl<'a> FinalBlockId<'a> {
+    pub fn try_decode(inner_bytes: &'a [u8]) -> Option<Self> {
+        if let Ok((nc_tlv, _)) = TLV::try_decode(inner_bytes) {
+            let typ: NonZeroU16 = nc_tlv.typ.try_into().ok()?;
+            Some(FinalBlockId {
+                component: NameComponent {
+                    typ,
+                    bytes: nc_tlv.val,
+                },
+            })
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a> TlvEncode for FinalBlockId<'a> {
+    const TLV_TYPE: u32 = 26;
+
+    fn inner_length(&self) -> usize {
+        self.component.encoded_length()
+    }
+
+    fn encode_inner<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
+        self.component.encode(writer)
+    }
+}
+
 pub struct SignatureInfo<'a> {
-    pub signature_type: u64,
+    pub signature_type: SignatureType,
     pub key_locator: Option<KeyLocator<'a>>,
 }
 
 impl<'a> SignatureInfo<'a> {
-    pub const SIGNATURE_TYPE_DIGEST_SHA256: u64 = 0;
-    pub const SIGNATURE_TYPE_SHA256_RSA: u64 = 1;
-    pub const SIGNATURE_TYPE_SHA256_ECDSA: u64 = 3;
-    pub const SIGNATURE_TYPE_HMAC_SHA256: u64 = 4;
-    pub const SIGNATURE_TYPE_ED25519: u64 = 5;
-
     pub fn try_decode(inner_bytes: &'a [u8]) -> Option<Self> {
         let mut offset = 0;
         let (signature_type_tlv, sig_type_len) = TLV::try_decode(inner_bytes).ok()?;
-        if signature_type_tlv.typ.get() != TLV_TYPE_SIGNATURE_TYPE {
+        if signature_type_tlv.typ.get() != SignatureType::TLV_TYPE {
             return None;
         }
         offset += sig_type_len;
-        let signature_type = signature_type_tlv.val_as_u64()?.into();
+        let signature_type = SignatureType {
+            val: signature_type_tlv.val_as_u64()?,
+        };
 
         let mut key_locator = None;
 
         if let Ok((key_locator_tlv, _)) = TLV::try_decode(&inner_bytes[offset..]) {
-            if key_locator_tlv.typ.get() == TLV_TYPE_SIGNATURE_KEY_LOCATOR {
+            if key_locator_tlv.typ.get() == KeyLocator::TLV_TYPE {
                 key_locator = Some(KeyLocator::try_decode(key_locator_tlv.val)?)
             }
         }
@@ -608,52 +566,53 @@ impl<'a> SignatureInfo<'a> {
     }
 }
 
-impl<'a> Encode for SignatureInfo<'a> {
-    fn encoded_length(&self) -> usize {
-        let mut len = (TLV_TYPE_SIGNATURE_TYPE as u64).encoded_length()
-            + self.signature_type.encoded_length();
-        if let Some(key_locator) = &self.key_locator {
-            len += key_locator.encoded_length();
-        }
-        (TLV_TYPE_SIGNATURE_INFO as u64).encoded_length() + (len as u64).encoded_length() + len
+impl<'a> TlvEncode for SignatureInfo<'a> {
+    const TLV_TYPE: u32 = 22;
+
+    fn inner_length(&self) -> usize {
+        let mut len = self.signature_type.encoded_length();
+        len += self.key_locator.encoded_length();
+        len
     }
 
-    fn encode<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
-        let len = self.encoded_length();
-        (TLV_TYPE_SIGNATURE_INFO as u64).encode(writer)?;
-        (len as u64).encode(writer)?;
-        (TLV_TYPE_SIGNATURE_TYPE as u64).encode(writer)?;
+    fn encode_inner<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
         self.signature_type.encode(writer)?;
-        if let Some(key_locator) = &self.key_locator {
-            key_locator.encode(writer)?;
-        }
+        self.key_locator.encode(writer)?;
         Ok(())
     }
 }
 
+pub type SignatureType = TypedInteger<27, u64>;
+
+impl SignatureType {
+    pub const SIGNATURE_TYPE_DIGEST_SHA256: u64 = 0;
+    pub const SHA256_RSA: u64 = 1;
+    pub const SHA256_ECDSA: u64 = 3;
+    pub const HMAC_SHA256: u64 = 4;
+    pub const ED25519: u64 = 5;
+}
+
+pub type SignatureValue<'a> = TypedBytes<'a, 23>;
+
 pub struct InterestSignatureInfo<'a> {
-    pub signature_type: u64,
+    pub signature_type: SignatureType,
     pub key_locator: Option<KeyLocator<'a>>,
-    pub nonce: Option<&'a [u8]>,
-    pub signature_time: Option<u64>,
-    pub signature_seq_num: Option<u64>,
+    pub nonce: Option<InterestSignatureNonce<'a>>,
+    pub signature_time: Option<InterestSignatureTime>,
+    pub signature_seq_num: Option<InterestSignatureSeqNum>,
 }
 
 impl<'a> InterestSignatureInfo<'a> {
-    pub const SIGNATURE_TYPE_DIGEST_SHA256: u64 = 0;
-    pub const SIGNATURE_TYPE_SHA256_RSA: u64 = 1;
-    pub const SIGNATURE_TYPE_SHA256_ECDSA: u64 = 3;
-    pub const SIGNATURE_TYPE_HMAC_SHA256: u64 = 4;
-    pub const SIGNATURE_TYPE_ED25519: u64 = 5;
-
     pub fn try_decode(inner_bytes: &'a [u8]) -> Option<Self> {
         let mut offset = 0;
         let (signature_type_tlv, sig_type_len) = TLV::try_decode(inner_bytes).ok()?;
-        if signature_type_tlv.typ.get() != TLV_TYPE_SIGNATURE_TYPE {
+        if signature_type_tlv.typ.get() != SignatureType::TLV_TYPE {
             return None;
         }
         offset += sig_type_len;
-        let signature_type = signature_type_tlv.val_as_u64()?.into();
+        let signature_type = SignatureType {
+            val: signature_type_tlv.val_as_u64()?,
+        };
 
         let mut key_locator = None;
         let mut nonce = None;
@@ -663,12 +622,20 @@ impl<'a> InterestSignatureInfo<'a> {
         while offset < inner_bytes.len() {
             let (tlv, tlv_len) = TLV::try_decode(&inner_bytes[offset..]).ok()?;
             match tlv.typ.get() {
-                TLV_TYPE_SIGNATURE_KEY_LOCATOR => {
-                    key_locator = Some(KeyLocator::try_decode(tlv.val)?)
+                KeyLocator::TLV_TYPE => key_locator = Some(KeyLocator::try_decode(tlv.val)?),
+                InterestSignatureNonce::TLV_TYPE => {
+                    nonce = Some(InterestSignatureNonce { bytes: tlv.val })
                 }
-                TLV_TYPE_SIGNATURE_NONCE => nonce = Some(tlv.val),
-                TLV_TYPE_SIGNATURE_TIME => signature_time = Some(tlv.val_as_u64()?),
-                TLV_TYPE_SIGNATURE_SEQ_NUM => signature_seq_num = Some(tlv.val_as_u64()?),
+                InterestSignatureTime::TLV_TYPE => {
+                    signature_time = Some(InterestSignatureTime {
+                        val: tlv.val_as_u64()?,
+                    })
+                }
+                InterestSignatureSeqNum::TLV_TYPE => {
+                    signature_seq_num = Some(InterestSignatureSeqNum {
+                        val: tlv.val_as_u64()?,
+                    })
+                }
                 _ => return None,
             }
             offset += tlv_len;
@@ -684,137 +651,128 @@ impl<'a> InterestSignatureInfo<'a> {
     }
 }
 
-impl<'a> Encode for InterestSignatureInfo<'a> {
-    fn encoded_length(&self) -> usize {
-        let mut len = (TLV_TYPE_SIGNATURE_TYPE as u64).encoded_length()
-            + self.signature_type.encoded_length();
-        if let Some(key_locator) = &self.key_locator {
-            len += key_locator.encoded_length();
-        }
-        if let Some(nonce) = self.nonce {
-            len += (TLV_TYPE_SIGNATURE_NONCE as u64).encoded_length()
-                + (nonce.len() as u64).encoded_length()
-                + nonce.len()
-        }
-        if let Some(signature_time) = self.signature_time {
-            len +=
-                (TLV_TYPE_SIGNATURE_TIME as u64).encoded_length() + signature_time.encoded_length()
-        }
-        if let Some(signature_seq_num) = self.signature_seq_num {
-            len += (TLV_TYPE_SIGNATURE_SEQ_NUM as u64).encoded_length()
-                + signature_seq_num.encoded_length()
-        }
-        (TLV_TYPE_INTEREST_SIGNATURE_INFO as u64).encoded_length()
-            + (len as u64).encoded_length()
-            + len
+impl<'a> TlvEncode for InterestSignatureInfo<'a> {
+    const TLV_TYPE: u32 = 44;
+
+    fn inner_length(&self) -> usize {
+        let mut len = self.signature_type.encoded_length();
+        len += self.key_locator.encoded_length();
+        len += self.nonce.encoded_length();
+        len += self.signature_time.encoded_length();
+        len += self.signature_seq_num.encoded_length();
+        len
     }
 
-    fn encode<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
-        let len = self.encoded_length();
-        (TLV_TYPE_INTEREST_SIGNATURE_INFO as u64).encode(writer)?;
-        (len as u64).encode(writer)?;
-        (TLV_TYPE_SIGNATURE_TYPE as u64).encode(writer)?;
+    fn encode_inner<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
         self.signature_type.encode(writer)?;
-        if let Some(key_locator) = &self.key_locator {
-            key_locator.encode(writer)?;
-        }
-        if let Some(nonce) = self.nonce {
-            (TLV_TYPE_SIGNATURE_NONCE as u64).encode(writer)?;
-            (nonce.len() as u64).encode(writer)?;
-            writer.write(nonce)?;
-        }
-        if let Some(signature_time) = self.signature_time {
-            (TLV_TYPE_SIGNATURE_TIME as u64).encode(writer)?;
-            signature_time.encode(writer)?;
-        }
-        if let Some(signature_seq_num) = self.signature_seq_num {
-            (TLV_TYPE_SIGNATURE_SEQ_NUM as u64).encode(writer)?;
-            signature_seq_num.encode(writer)?;
-        }
-        Ok(())
+        self.key_locator.encode(writer)?;
+        self.nonce.encode(writer)?;
+        self.signature_time.encode(writer)?;
+        self.signature_seq_num.encode(writer)
     }
 }
 
+pub type InterestSignatureNonce<'a> = TypedBytes<'a, 38>;
+pub type InterestSignatureTime = TypedInteger<40, u64>;
+pub type InterestSignatureSeqNum = TypedInteger<42, u64>;
+pub type InterestSignatureValue<'a> = TypedBytes<'a, 46>;
+
 pub enum KeyLocator<'a> {
     Name(Name<'a>),
-    KeyDigest(&'a [u8]),
+    KeyDigest(KeyDigest<'a>),
 }
 
 impl<'a> KeyLocator<'a> {
     pub fn try_decode(inner_bytes: &'a [u8]) -> Option<Self> {
         let (inner_tlv, _) = TLV::try_decode(inner_bytes).ok()?;
         match inner_tlv.typ.get() {
-            Name::TLV_TYPE_NAME => Some(Self::Name(Name::try_decode(inner_tlv.val)?)),
-            TLV_TYPE_SIGNATURE_KEY_DIGEST => Some(Self::KeyDigest(&inner_tlv.val)),
+            Name::TLV_TYPE => Some(Self::Name(Name::try_decode(inner_tlv.val)?)),
+            KeyDigest::TLV_TYPE => Some(Self::KeyDigest(KeyDigest {
+                bytes: &inner_tlv.val,
+            })),
             _ => None,
         }
     }
 }
 
-impl<'a> Encode for KeyLocator<'a> {
-    fn encoded_length(&self) -> usize {
-        let len = match self {
+impl<'a> TlvEncode for KeyLocator<'a> {
+    const TLV_TYPE: u32 = 28;
+
+    fn inner_length(&self) -> usize {
+        match self {
             KeyLocator::Name(name) => name.encoded_length(),
-            KeyLocator::KeyDigest(items) => {
-                (TLV_TYPE_SIGNATURE_KEY_DIGEST as u64).encoded_length()
-                    + (items.len() as u64).encoded_length()
-                    + items.len()
-            }
-        };
-        (TLV_TYPE_SIGNATURE_KEY_LOCATOR as u64).encoded_length()
-            + (len as u64).encoded_length()
-            + len
+            KeyLocator::KeyDigest(locator) => locator.encoded_length(),
+        }
     }
 
-    fn encode<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
-        let len = self.encoded_length();
-        (TLV_TYPE_SIGNATURE_KEY_LOCATOR as u64).encode(writer)?;
-        (len as u64).encode(writer)?;
+    fn encode_inner<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
         match self {
             KeyLocator::Name(name) => name.encode(writer),
-            KeyLocator::KeyDigest(items) => {
-                (TLV_TYPE_SIGNATURE_KEY_DIGEST as u64).encode(writer)?;
-                (items.len() as u64).encode(writer)?;
-                writer.write(items)
-            }
+            KeyLocator::KeyDigest(locator) => locator.encode(writer),
         }
     }
 }
 
-const TLV_TYPE_INTEREST: u32 = 5;
-const TLV_TYPE_DATA: u32 = 6;
-
-const TLV_TYPE_META_INFO: u32 = 20;
-const TLV_TYPE_CONTENT: u32 = 21;
-const TLV_TYPE_SIGNATURE_INFO: u32 = 22;
-const TLV_TYPE_SIGNATURE_VALUE: u32 = 23;
-
-const TLV_TYPE_CAN_BE_PREFIX: u32 = 33;
-const TLV_TYPE_MUST_BE_FRESH: u32 = 18;
-const TLV_TYPE_FORWARDING_HINT: u32 = 30;
-const TLV_TYPE_NONCE: u32 = 10;
-const TLV_TYPE_INTEREST_LIFETIME: u32 = 12;
-const TLV_TYPE_HOP_LIMIT: u32 = 34;
-const TLV_TYPE_APPLICATION_PARAMETERS: u32 = 36;
-const TLV_TYPE_INTEREST_SIGNATURE_INFO: u32 = 44;
-const TLV_TYPE_INTEREST_SIGNATURE_VALUE: u32 = 46;
-
-const TLV_TYPE_META_INFO_CONTENT_TYPE: u32 = 24;
-const TLV_TYPE_META_INFO_FRESHNESS_PERIOD: u32 = 25;
-const TLV_TYPE_META_INFO_FINAL_BLOCK_ID: u32 = 26;
-
-const TLV_TYPE_SIGNATURE_TYPE: u32 = 27;
-const TLV_TYPE_SIGNATURE_KEY_DIGEST: u32 = 28;
-const TLV_TYPE_SIGNATURE_KEY_LOCATOR: u32 = 29;
-const TLV_TYPE_SIGNATURE_NONCE: u32 = 38;
-const TLV_TYPE_SIGNATURE_TIME: u32 = 40;
-const TLV_TYPE_SIGNATURE_SEQ_NUM: u32 = 42;
+pub type KeyDigest<'a> = TypedBytes<'a, 29>;
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
+
+    use crate::{packet::KeyLocator, tlv::Encode};
 
     #[test]
-    fn test_key_locator() {}
+    fn test_key_locator() {
+        let name_locator_inner_bytes = &[
+            7, 14, 8, 5, b'h', b'e', b'l', b'l', b'o', 1, 5, b'w', b'o', b'r', b'l', b'd',
+        ];
+
+        let name_locator_outer_bytes = &[
+            29, 16, 7, 14, 8, 5, b'h', b'e', b'l', b'l', b'o', 1, 5, b'w', b'o', b'r', b'l', b'd',
+        ];
+
+        let name_locator = KeyLocator::try_decode(name_locator_inner_bytes);
+        assert!(name_locator.is_some());
+        let name = match &name_locator {
+            Some(KeyLocator::Name(name)) => name,
+            _ => panic!(),
+        };
+        assert!(name.component_count() == 2);
+
+        let mut buf = Vec::new();
+        let name_locator = name_locator.unwrap();
+        assert!(name_locator.encoded_length() == name_locator_outer_bytes.len());
+        let _ = name_locator.encode(&mut buf);
+        assert!(buf.as_slice() == name_locator_outer_bytes);
+
+        let name_locator = KeyLocator::try_decode(&[
+            7, 15, 8, 5, b'h', b'e', b'l', b'l', b'o', 1, 5, b'w', b'o', b'r', b'l', b'd',
+        ]);
+        assert!(name_locator.is_none());
+
+        let name_locator = KeyLocator::try_decode(&[
+            7, 15, 8, 5, b'h', b'e', b'l', b'l', b'o', 1, 6, b'w', b'o', b'r', b'l', b'd',
+        ]);
+        assert!(name_locator.is_none());
+
+        let digest_locator_inner_bytes = &[28, 4, 255, 254, 253, 252];
+
+        let digest_locator_outer_bytes = &[29, 6, 28, 4, 255, 254, 253, 252];
+
+        let digest_locator = KeyLocator::try_decode(digest_locator_inner_bytes);
+        assert!(digest_locator.is_some());
+        let digest = match &digest_locator {
+            Some(KeyLocator::KeyDigest(digest)) => digest,
+            _ => panic!(),
+        };
+        assert!(digest.bytes == &[255, 254, 253, 252]);
+
+        let mut buf = Vec::new();
+        let digest_locator = digest_locator.unwrap();
+        assert!(digest_locator.encoded_length() == digest_locator_outer_bytes.len());
+        let _ = digest_locator.encode(&mut buf);
+        assert!(buf.as_slice() == digest_locator_outer_bytes);
+    }
 
     #[test]
     fn test_signature_info() {}
@@ -836,5 +794,6 @@ mod tests {
     #[test]
     fn test_interest() {
         // Including hashing
+        // Including hop byte
     }
 }

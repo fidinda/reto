@@ -29,6 +29,14 @@ pub trait Encode {
     fn encode<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error>;
 }
 
+pub trait TlvEncode {
+    const TLV_TYPE: u32;
+
+    fn inner_length(&self) -> usize;
+    fn encode_inner<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error>;
+}
+
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TLV<'a> {
     pub typ: NonZeroU32,
@@ -134,6 +142,19 @@ impl<'a> TLV<'a> {
     }
 }
 
+impl<'a> Encode for TLV<'a> {
+    fn encoded_length(&self) -> usize {
+        let l = self.val.len();
+        (self.typ.get() as u64).encoded_length() + (l as u64).encoded_length() + l
+    }
+
+    fn encode<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
+        (self.typ.get() as u64).encode(writer)?;
+        (self.val.len() as u64).encode(writer)?;
+        writer.write(&self.val)
+    }
+}
+
 impl Encode for u64 {
     fn encoded_length(&self) -> usize {
         if *self <= 252 {
@@ -163,18 +184,113 @@ impl Encode for u64 {
     }
 }
 
-impl<'a> Encode for TLV<'a> {
+impl<E: Encode> Encode for Option<E> {
     fn encoded_length(&self) -> usize {
-        let l = self.val.len();
-        (self.typ.get() as u64).encoded_length() + (l as u64).encoded_length() + l
+        match self {
+            Some(inner) => inner.encoded_length(),
+            None => 0,
+        }
     }
 
     fn encode<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
-        (self.typ.get() as u64).encode(writer)?;
-        (self.val.len() as u64).encode(writer)?;
-        writer.write(&self.val)
+        match self {
+            Some(inner) => inner.encode(writer),
+            None => Ok(()),
+        }
     }
 }
+
+impl<E1: Encode, E2: Encode> Encode for (E1, E2) {
+    fn encoded_length(&self) -> usize {
+        self.0.encoded_length() + self.1.encoded_length()
+    }
+
+    fn encode<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
+        self.0.encode(writer)?;
+        self.1.encode(writer)
+    }
+}
+
+impl<E: TlvEncode> Encode for E {
+    fn encoded_length(&self) -> usize {
+        let len = self.inner_length();
+        (Self::TLV_TYPE as u64).encoded_length() + (len as u64).encoded_length() + len
+    }
+
+    fn encode<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
+        (Self::TLV_TYPE as u64).encode(writer)?;
+        (self.inner_length() as u64).encode(writer)?;
+        self.encode_inner(writer)
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct TypedEmpty<const TYPE: u32> {}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct TypedInteger<const TYPE: u32, I: Into<u64> + TryFrom<u64> + Copy> {
+    pub val: I,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct TypedBytes<'a, const TYPE: u32> {
+    pub bytes: &'a [u8],
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct TypedArray<const TYPE: u32, const LEN: usize> {
+    pub bytes: [u8; LEN],
+}
+
+impl<const TYPE: u32> TlvEncode for TypedEmpty<TYPE> {
+    const TLV_TYPE: u32 = TYPE;
+
+    fn inner_length(&self) -> usize {
+        0
+    }
+
+    fn encode_inner<W: Write + ?Sized>(&self, _writer: &mut W) -> Result<(), W::Error> {
+        Ok(())
+    }
+}
+
+
+impl<const TYPE: u32, I: Into<u64> + TryFrom<u64> + Copy> TlvEncode for TypedInteger<TYPE, I> {
+    const TLV_TYPE: u32 = TYPE;
+
+    fn inner_length(&self) -> usize {
+        self.val.into().encoded_length()
+    }
+
+    fn encode_inner<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
+        self.val.into().encode(writer)
+    }
+}
+
+impl<'a, const TYPE: u32> TlvEncode for TypedBytes<'a, TYPE> {
+    const TLV_TYPE: u32 = TYPE;
+
+    fn inner_length(&self) -> usize {
+        self.bytes.len()
+    }
+
+    fn encode_inner<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
+        writer.write(&self.bytes)
+    }
+}
+
+impl<'a, const TYPE: u32, const LEN: usize> TlvEncode for TypedArray<TYPE, LEN> {
+    const TLV_TYPE: u32 = TYPE;
+
+    fn inner_length(&self) -> usize {
+        LEN
+    }
+
+    fn encode_inner<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
+        writer.write(&self.bytes)
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -259,7 +375,8 @@ mod tests {
             cursor: 0,
         };
 
-        for v in (0u64..256)
+        for v in (0u64..2)
+            .chain(252..256)
             .chain(65535..65537)
             .chain(4294967295..4294967297)
         {
@@ -339,7 +456,8 @@ mod tests {
             NonZeroU32::new(4294967295).unwrap(),
         ];
 
-        for v in (0u64..256)
+        for v in (0u64..2)
+            .chain(252..256)
             .chain(65535..65537)
             .chain(4294967295..4294967297)
         {
