@@ -96,7 +96,7 @@ impl<'a> Interest<'a> {
                 minimum_possible_known = idx;
             } else {
                 // It is an unknown TLV
-                if tlv.is_critical() {
+                if tlv.type_is_critical() {
                     return None; // There is a critical unknown type, so we must bail
                 }
 
@@ -161,7 +161,7 @@ impl<'a> Interest<'a> {
             }
         }
 
-        let mut hh = crate::hash::EncodedHasher { hasher };
+        let mut hh = EncodedHasher { hasher };
         let _ = relevant_name.encode(&mut hh);
 
         let (application_parameters, signature_info) = match self.application_parameters.as_ref() {
@@ -313,7 +313,7 @@ impl<'a> Data<'a> {
                 minimum_possible_known = idx;
             } else {
                 // It is an unknown TLV
-                if tlv.is_critical() {
+                if tlv.type_is_critical() {
                     return None; // There is a critical unknown type, so we must bail
                 }
 
@@ -349,32 +349,24 @@ impl<'a> Data<'a> {
     fn length_of_signed_portion(&self) -> usize {
         let mut len = self.name.encoded_length();
         len += self.unknown_tlvs[0].len();
-        if let Some(meta_info) = &self.meta_info {
-            len += meta_info.encoded_length();
-        }
+        len += self.meta_info.encoded_length();
         len += self.unknown_tlvs[1].len();
-        if let Some(content) = &self.content {
-            len += content.encoded_length();
-        }
+        len += self.content.encoded_length();
         len += self.unknown_tlvs[2].len();
         len + self.signature_info.encoded_length()
     }
 
     pub fn hash_signed_portion<const N: usize, H: Hasher<N>>(&self, hasher: &mut H) {
-        let mut hh = crate::hash::EncodedHasher { hasher };
+        let mut hh = EncodedHasher { hasher };
         let _ = self.encode_signed_portion(&mut hh);
     }
 
     fn encode_signed_portion<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
         self.name.encode(writer)?;
         writer.write(self.unknown_tlvs[0])?;
-        if let Some(meta_info) = &self.meta_info {
-            meta_info.encode(writer)?;
-        }
+        self.meta_info.encode(writer)?;
         writer.write(self.unknown_tlvs[1])?;
-        if let Some(content) = &self.content {
-            content.encode(writer)?;
-        }
+        self.content.encode(writer)?;
         writer.write(self.unknown_tlvs[2])?;
         self.signature_info.encode(writer)
     }
@@ -464,28 +456,16 @@ impl<'a> TlvEncode for MetaInfo<'a> {
 
     fn inner_length(&self) -> usize {
         let mut len = 0;
-        if let Some(ct) = self.content_type {
-            len += ct.encoded_length();
-        }
-        if let Some(freshness_period) = self.freshness_period {
-            len += freshness_period.encoded_length();
-        }
-        if let Some(final_block_id) = self.final_block_id {
-            len += final_block_id.encoded_length();
-        }
+        len += self.content_type.encoded_length();
+        len += self.freshness_period.encoded_length();
+        len += self.final_block_id.encoded_length();
         len + self.unknown_tlvs.len()
     }
 
     fn encode_inner<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
-        if let Some(ct) = self.content_type {
-            ct.encode(writer)?;
-        }
-        if let Some(freshness_period) = self.freshness_period {
-            freshness_period.encode(writer)?;
-        }
-        if let Some(final_block_id) = self.final_block_id {
-            final_block_id.encode(writer)?;
-        }
+        self.content_type.encode(writer)?;
+        self.freshness_period.encode(writer)?;
+        self.final_block_id.encode(writer)?;
         writer.write(self.unknown_tlvs)
     }
 }
@@ -714,6 +694,18 @@ impl<'a> TlvEncode for KeyLocator<'a> {
 }
 
 pub type KeyDigest<'a> = TypedBytes<'a, 29>;
+
+struct EncodedHasher<'a, const N: usize, H: Hasher<N>> {
+    pub(crate) hasher: &'a mut H,
+}
+
+impl<'a, const N: usize, H: Hasher<N>> crate::io::Write for EncodedHasher<'a, N, H> {
+    type Error = ();
+
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
+        Ok(self.hasher.update(bytes))
+    }
+}
 
 #[cfg(test)]
 mod tests {

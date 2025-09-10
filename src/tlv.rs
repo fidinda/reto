@@ -36,7 +36,6 @@ pub trait TlvEncode {
     fn encode_inner<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error>;
 }
 
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TLV<'a> {
     pub typ: NonZeroU32,
@@ -46,7 +45,7 @@ pub struct TLV<'a> {
 impl<'a> TLV<'a> {
     // This matters when the evolution of the protocol requires adding new types.
     // When an unknown type is critical we must signal error, otherwise we can ignore it.
-    pub fn is_critical(&self) -> bool {
+    pub fn type_is_critical(&self) -> bool {
         let typ = self.typ.get();
         typ < 32 || typ & 1 == 1
     }
@@ -254,7 +253,6 @@ impl<const TYPE: u32> TlvEncode for TypedEmpty<TYPE> {
     }
 }
 
-
 impl<const TYPE: u32, I: Into<u64> + TryFrom<u64> + Copy> TlvEncode for TypedInteger<TYPE, I> {
     const TLV_TYPE: u32 = TYPE;
 
@@ -290,7 +288,6 @@ impl<'a, const TYPE: u32, const LEN: usize> TlvEncode for TypedArray<TYPE, LEN> 
         writer.write(&self.bytes)
     }
 }
-
 
 #[cfg(test)]
 mod tests {

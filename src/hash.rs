@@ -18,15 +18,3 @@ impl Digest<32> for Sha256Digest {
         self.digest
     }
 }
-
-pub(crate) struct EncodedHasher<'a, const N: usize, H: Hasher<N>> {
-    pub(crate) hasher: &'a mut H,
-}
-
-impl<'a, const N: usize, H: Hasher<N>> crate::io::Write for EncodedHasher<'a, N, H> {
-    type Error = ();
-
-    fn write(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
-        Ok(self.hasher.update(bytes))
-    }
-}
