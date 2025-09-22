@@ -1,4 +1,4 @@
-mod reference;
+pub mod reference;
 
 use crate::{clock::Timestamp, forwarder::FaceToken, name::Name};
 
@@ -43,7 +43,7 @@ pub trait Tables {
         packet: &'a [u8],
     );
 
-    // Checks the cache for stored data satisfyig the name and parameters
+    // Checks the cache for stored data satisfying the name and parameters
     fn get_data<'a>(
         &mut self,
         name: Name<'a>,

@@ -5,4 +5,4 @@ Cargo.lock
 *.pdb
 
 .DS_Store
-.vscode/
+.vscode

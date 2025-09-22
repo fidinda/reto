@@ -13,7 +13,13 @@ keywords = ["networking"]
 [lib]
 name = "reto"
 
-[dependencies]
+[features]
+default = ["std", "poller", "sha2"]
+std = []
+sha2 = ["dep:sha2"]
+poller = ["std", "dep:polling"]
+websocket = ["std"]
 
-[dev-dependencies]
-sha2 = "0.10"
+[dependencies]
+polling = {version = "3.10.0", optional = true }
+sha2 = {version = "0.10.9", optional = true }

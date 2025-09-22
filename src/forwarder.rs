@@ -3,12 +3,12 @@ use alloc::{boxed::Box, vec::Vec};
 use crate::{
     clock::Clock,
     face::{FaceError, FaceReceiver, FaceSender},
-    hash::{Digest, Hasher, Sha256Digest},
+    hash::{Hasher, Sha256Digest},
     io::Write,
     name::Name,
     packet::{Data, Interest},
     tables::Tables,
-    tlv::{DecodingError, Encode, TlvEncode, VarintDecodingError, TLV},
+    tlv::{DecodingError, TlvEncode, VarintDecodingError, TLV},
 };
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -38,10 +38,16 @@ pub trait ForwarderMetrics {
     // TODO: add bytes
 }
 
+pub struct InertMetrics {}
+
+impl ForwarderMetrics for InertMetrics {}
+
+pub const MAX_PACKET_SIZE: usize = 8800;
+
 pub struct Forwarder<C, H, M, T>
 where
     C: Clock,
-    H: Hasher<32, Digest = Sha256Digest>,
+    H: Hasher<Digest = Sha256Digest>,
     M: ForwarderMetrics,
     T: Tables,
 {
@@ -56,7 +62,7 @@ where
 impl<C, H, M, T> Forwarder<C, H, M, T>
 where
     C: Clock,
-    H: Hasher<32, Digest = Sha256Digest>,
+    H: Hasher<Digest = Sha256Digest>,
     M: ForwarderMetrics,
     T: Tables,
 {
@@ -82,7 +88,12 @@ where
     }
 
     pub fn remove_face(&mut self, token: FaceToken) -> bool {
+        self.tables.unregister_face(token);
         self.faces.remove_face(token)
+    }
+
+    pub fn next_face_token(&self) -> Option<FaceToken> {
+        Some(FaceToken(self.faces.next_face_token()?))
     }
 
     pub fn register_name_prefix_for_forwarding<'a>(
@@ -102,32 +113,28 @@ where
         self.tables.unregister_prefix(name_prefix, forward_to)
     }
 
-    pub fn forward(&mut self, face_to_use: Option<&FaceToken>) -> Result<(), ForwarderError> {
-        let ret = if let Some(token) = face_to_use {
-            // If we were given an explicit face to try we try it
-            if let Some(index) = Faces::find_face(&self.faces.faces, token) {
-                if self.try_recv_from_face_at_index(index)? {
-                    Ok(())
-                } else {
-                    Err(ForwarderError::NothingToForward)
-                }
+    pub fn try_forward_from_face(&mut self, face: FaceToken) -> Result<(), ForwarderError> {
+        let ret = if let Some(index) = Faces::find_face(&self.faces.faces, &face) {
+            if self.try_recv_from_face_at_index(index)? {
+                Ok(())
             } else {
-                Err(ForwarderError::FaceNotfound)
+                Err(ForwarderError::NothingToForward)
             }
         } else {
-            // Otherwise we try all the faces in turn
-            for _ in 0..self.faces.len() {
-                self.last_checked_face = if self.last_checked_face >= self.faces.len() {
-                    0
-                } else {
-                    self.last_checked_face + 1
-                };
-                if self.try_recv_from_face_at_index(self.last_checked_face)? {
-                    return Ok(());
-                }
-            }
-            Err(ForwarderError::NothingToForward)
+            Err(ForwarderError::FaceNotfound)
         };
+        self.tables.prune_if_needed(self.clock.now());
+        ret
+    }
+
+    pub fn try_forward_from_any_face(&mut self) -> Result<FaceToken, ForwarderError> {
+        let mut ret = Err(ForwarderError::NothingToForward);
+        for _ in 0..self.faces.len() {
+            self.last_checked_face = (self.last_checked_face + 1) % self.faces.len();
+            if self.try_recv_from_face_at_index(self.last_checked_face)? {
+                ret = Ok(FaceToken(self.faces.faces[self.last_checked_face].0));
+            }
+        }
         self.tables.prune_if_needed(self.clock.now());
         ret
     }
@@ -320,9 +327,9 @@ where
         }
 
         // We need to decrement the hop byte if it is present
-         let hop_value_and_byte_idx = if let Some(v) = interest.hop_limit.as_mut() {
+        let hop_value_and_byte_idx = if let Some(v) = interest.hop_limit.as_mut() {
             v.val = v.val.saturating_sub(1);
-            let hop_val = v.val; 
+            let hop_val = v.val;
             if let Some(idx) = interest.index_of_hop_byte_in_encoded_tlv() {
                 Some((hop_val, idx))
             } else {
@@ -382,7 +389,7 @@ where
             None => {
                 hasher.reset();
                 hasher.update(original_packet);
-                let inner = hasher.finalize().into_inner();
+                let inner = hasher.finalize_reset().0;
                 digest = Some(inner);
                 inner
             }
@@ -445,7 +452,7 @@ impl Faces {
         FS: FaceSender + 'static,
         FR: FaceReceiver + 'static,
     {
-        let token = self.latest_face_token.checked_add(1)?;
+        let token = self.next_face_token()?;
         let entry = FaceEntry {
             sender: Box::new(sender),
             receiver: Box::new(receiver),
@@ -467,6 +474,10 @@ impl Faces {
         }
     }
 
+    pub fn next_face_token(&self) -> Option<u32> {
+        self.latest_face_token.checked_add(1)
+    }
+
     fn len(&self) -> usize {
         self.faces.len()
     }
@@ -476,8 +487,6 @@ impl Faces {
         faces.binary_search_by_key(&token.0, |x| x.0).ok()
     }
 }
-
-const MAX_PACKET_SIZE: usize = 8800;
 
 struct FaceEntry {
     sender: Box<dyn FaceSender>,
@@ -539,17 +548,6 @@ impl FaceEntry {
             }
         }
 
-        if let Err(FaceError::Disconnected) = self.sender.flush() {
-            self.should_close = true;
-            return;
-        }
-    }
-
-    fn send_encodable<E: Encode>(&mut self, encodable: &E) {
-        if let Err(FaceError::Disconnected) = encodable.encode(self.sender.as_mut()) {
-            self.should_close = true;
-            return;
-        }
         if let Err(FaceError::Disconnected) = self.sender.flush() {
             self.should_close = true;
             return;

@@ -1,9 +1,11 @@
 //mod datagram_face;
 
+pub mod buffered;
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum FaceError {
     Disconnected,
 }
-
 
 pub trait FaceReceiver {
     // We try to receive the bytes from the face if any are available.
@@ -19,9 +21,9 @@ pub trait FaceSender {
     fn try_send(&mut self, src: &[u8]) -> Result<usize, FaceError>;
 
     // Used to signal that a chunk of data can be sent further on.
-    // Useful, for example, for datagram faces, which could buffer the 
+    // Useful, for example, for datagram faces, which could buffer the
     //  changes and send the actual datagram when flush is called.
-    fn flush(&mut self) -> Result<(), FaceError> { 
+    fn flush(&mut self) -> Result<(), FaceError> {
         Ok(())
     }
 }
@@ -35,11 +37,9 @@ impl<FS: FaceSender + ?Sized> Write for FS {
         let len = bytes.len();
         let mut sent_so_far = 0;
         while sent_so_far < len {
-            sent_so_far += self
-                .try_send(&bytes[sent_so_far..])?;
+            sent_so_far += self.try_send(&bytes[sent_so_far..])?;
         }
         debug_assert!(sent_so_far == len);
         Ok(())
     }
 }
-

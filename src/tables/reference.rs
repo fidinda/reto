@@ -57,6 +57,12 @@ impl ReferenceTables {
     }
 }
 
+impl Default for ReferenceTables {
+    fn default() -> Self {
+        Self::new(10 * 1000, 6 * 1000)
+    }
+}
+
 impl Tables for ReferenceTables {
     fn unregister_face(&mut self, face: FaceToken) {
         self.root

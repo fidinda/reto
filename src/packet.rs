@@ -153,7 +153,7 @@ impl<'a> Interest<'a> {
         })
     }
 
-    pub fn hash_signed_portion<const N: usize, H: Hasher<N>>(&self, hasher: &mut H) -> bool {
+    pub fn hash_signed_portion<H: Hasher>(&self, hasher: &mut H) -> bool {
         let mut relevant_name = self.name;
         if let Some(last_component) = relevant_name.components().last() {
             if last_component.typ.get() == NameComponent::TYPE_PARAMETER_SHA256 {
@@ -356,7 +356,7 @@ impl<'a> Data<'a> {
         len + self.signature_info.encoded_length()
     }
 
-    pub fn hash_signed_portion<const N: usize, H: Hasher<N>>(&self, hasher: &mut H) {
+    pub fn hash_signed_portion<H: Hasher>(&self, hasher: &mut H) {
         let mut hh = EncodedHasher { hasher };
         let _ = self.encode_signed_portion(&mut hh);
     }
@@ -695,11 +695,11 @@ impl<'a> TlvEncode for KeyLocator<'a> {
 
 pub type KeyDigest<'a> = TypedBytes<'a, 29>;
 
-struct EncodedHasher<'a, const N: usize, H: Hasher<N>> {
+struct EncodedHasher<'a, H: Hasher> {
     pub(crate) hasher: &'a mut H,
 }
 
-impl<'a, const N: usize, H: Hasher<N>> crate::io::Write for EncodedHasher<'a, N, H> {
+impl<'a, H: Hasher> crate::io::Write for EncodedHasher<'a, H> {
     type Error = ();
 
     fn write(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
