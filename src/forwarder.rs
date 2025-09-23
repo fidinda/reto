@@ -11,7 +11,7 @@ use crate::{
     tlv::{DecodingError, TlvEncode, VarintDecodingError, TLV},
 };
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct FaceToken(pub(crate) u32);
 
 pub enum ForwarderError {
@@ -133,6 +133,7 @@ where
             self.last_checked_face = (self.last_checked_face + 1) % self.faces.len();
             if self.try_recv_from_face_at_index(self.last_checked_face)? {
                 ret = Ok(FaceToken(self.faces.faces[self.last_checked_face].0));
+                break;
             }
         }
         self.tables.prune_if_needed(self.clock.now());
@@ -453,6 +454,7 @@ impl Faces {
         FR: FaceReceiver + 'static,
     {
         let token = self.next_face_token()?;
+        self.latest_face_token = token;
         let entry = FaceEntry {
             sender: Box::new(sender),
             receiver: Box::new(receiver),
@@ -552,5 +554,119 @@ impl FaceEntry {
             self.should_close = true;
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        face::{
+            buffered::{BufferedFaceReceiver, BufferedReceiver, BufferedRecvError},
+            local::local_face,
+        },
+        forwarder::{Forwarder, InertMetrics, MAX_PACKET_SIZE},
+        hash::Hasher,
+        name::{Name, NameComponent},
+        packet::{Data, Interest, SignatureInfo, SignatureValue},
+        platform::sha::Sha256Hasher,
+        tables::reference::ReferenceTables,
+        tlv::{Encode, TlvEncode},
+    };
+
+    #[test]
+    fn test_basics() {
+        let clock = crate::platform::clock::MonotonicClock::new();
+        let hasher = Sha256Hasher::new();
+        let metrics = InertMetrics {};
+        let tables = ReferenceTables::default();
+
+        // Create two pairs of local faces (each "local face" needs a tx pair and rx pair)
+        let (fs1, face1receiver) = local_face::<MAX_PACKET_SIZE>();
+        let (mut face1sender, fr1) = local_face::<MAX_PACKET_SIZE>();
+        let (fs2, face2receiver) = local_face::<MAX_PACKET_SIZE>();
+        let (mut face2sender, fr2) = local_face::<MAX_PACKET_SIZE>();
+
+        let mut face1receiver = BufferedReceiver::<_, 88000>::new(face1receiver);
+        let mut face2receiver = BufferedReceiver::<_, 88000>::new(face2receiver);
+
+        let mut forwarder = Forwarder::new(clock, hasher, metrics, tables);
+
+        let face1 = forwarder.add_face(fs1, fr1).unwrap();
+        let face2 = forwarder.add_face(fs2, fr2).unwrap();
+
+        let name_prefix = Name::new();
+        let name_prefix = name_prefix.adding_component(NameComponent::new_generic(b"ndn"));
+
+        forwarder.register_name_prefix_for_forwarding(name_prefix, face2, 0);
+
+        let name = name_prefix.adding_component(NameComponent::new_generic(b"version"));
+        let nonce = [1, 2, 3, 4];
+        let interest = Interest::new(name, false, nonce);
+
+        assert!(interest.encode(&mut face1sender).is_ok());
+
+        match forwarder.try_forward_from_any_face() {
+            Ok(ff) => assert_eq!(ff, face1),
+            Err(_) => panic!(),
+        }
+
+        loop {
+            match face2receiver.try_recv() {
+                Ok(tlv) => {
+                    assert_eq!(tlv.typ.get(), Interest::TLV_TYPE);
+                    let received_interest = Interest::try_decode(tlv.val).unwrap();
+                    assert_eq!(
+                        interest.name.component_count(),
+                        received_interest.name.component_count()
+                    );
+                    assert!(Iterator::eq(
+                        interest.name.components(),
+                        received_interest.name.components()
+                    ));
+                    assert_eq!(received_interest.nonce.unwrap().bytes, nonce);
+
+                    let payload = b"v0.3";
+                    let signature_info = SignatureInfo::new_digest_sha256();
+                    let mut data = Data::new_unsigned(name, payload, signature_info);
+                    let mut hasher = Sha256Hasher::new();
+                    data.hash_signed_portion(&mut hasher);
+                    let digest = hasher.finalize_reset();
+                    data.signature_value = SignatureValue {
+                        bytes: digest.0.as_slice(),
+                    };
+
+                    assert!(data.encode(&mut face2sender).is_ok());
+                    break;
+                }
+                Err(BufferedRecvError::NothingReceived) => continue,
+                Err(_) => panic!(),
+            }
+        }
+
+        match forwarder.try_forward_from_any_face() {
+            Ok(ff) => assert_eq!(ff, face2),
+            Err(_) => panic!(),
+        }
+
+        loop {
+            match face1receiver.try_recv() {
+                Ok(tlv) => {
+                    assert_eq!(tlv.typ.get(), Data::TLV_TYPE);
+                    let received_data = Data::try_decode(tlv.val).unwrap();
+                    assert_eq!(received_data.content.unwrap().bytes, b"v0.3");
+
+                    let mut hasher = Sha256Hasher::new();
+                    received_data.hash_signed_portion(&mut hasher);
+                    let digest = hasher.finalize_reset();
+                    assert_eq!(received_data.signature_value.bytes, digest.0.as_slice());
+                    break;
+                }
+                Err(BufferedRecvError::NothingReceived) => continue,
+                Err(_) => panic!(),
+            }
+        }
+
+        forwarder.remove_face(face1);
+        forwarder.remove_face(face2);
     }
 }

@@ -844,7 +844,8 @@ impl DeadNonceList {
                 offset += 8;
             }
             if offset < cc.bytes.len() {
-                arr.copy_from_slice(&cc.bytes[offset..]);
+                arr = [0u8; 8];
+                arr[..(cc.bytes.len() - offset)].copy_from_slice(&cc.bytes[offset..]);
                 Self::add_to_hash(&mut hash, u64::from_be_bytes(arr) as u64);
             }
         }
@@ -863,7 +864,8 @@ impl DeadNonceList {
 }
 
 const DEFAULT_DEADLINE_INCREMENT_MS: u64 = 4000; // 4 sec
-                                                 //const RETRANSMISSION_PERIOD_MS: u64 = 1000; // 1 sec
+                                        
+//const RETRANSMISSION_PERIOD_MS: u64 = 1000; // 1 sec
 
 const MIN_RETRANSMISSION_DELAY_MS: u64 = 8;
 const MAX_RETRANSMISSION_DELAY_DOUBLINGS: u8 = 5;

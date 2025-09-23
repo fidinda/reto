@@ -1,4 +1,4 @@
-mod clock;
+pub mod clock;
 mod notifying;
 
 impl<const SIZE: usize> notifying::Notifying for crate::face::local::LocalReceiver<SIZE> {}

@@ -29,6 +29,26 @@ pub struct Interest<'a> {
 }
 
 impl<'a> Interest<'a> {
+    pub fn new(name: Name<'a>, can_be_prefix: bool, nonce: [u8; 4]) -> Self {
+        let can_be_prefix = if can_be_prefix {
+            Some(CanBePrefix {})
+        } else {
+            None
+        };
+
+        Self {
+            name,
+            can_be_prefix,
+            must_be_fresh: None,
+            forwarding_hint: None,
+            nonce: Some(InterestNonce { bytes: nonce }),
+            interest_lifetime: None,
+            hop_limit: None,
+            application_parameters: None,
+            unknown_tlvs: Default::default(),
+        }
+    }
+
     pub fn try_decode(inner_bytes: &'a [u8]) -> Option<Self> {
         let mut offset = 0;
 
@@ -267,6 +287,21 @@ pub struct Data<'a> {
 }
 
 impl<'a> Data<'a> {
+    pub fn new_unsigned(
+        name: Name<'a>,
+        payload: &'a [u8],
+        signature_info: SignatureInfo<'a>,
+    ) -> Self {
+        Self {
+            name,
+            meta_info: None,
+            content: Some(Content { bytes: payload }),
+            signature_info,
+            signature_value: SignatureValue { bytes: &[] },
+            unknown_tlvs: Default::default(),
+        }
+    }
+
     pub fn try_decode(inner_bytes: &'a [u8]) -> Option<Self> {
         let mut offset = 0;
 
@@ -520,6 +555,15 @@ pub struct SignatureInfo<'a> {
 }
 
 impl<'a> SignatureInfo<'a> {
+    pub fn new_digest_sha256() -> Self {
+        Self {
+            signature_type: TypedInteger {
+                val: SignatureType::DIGEST_SHA256,
+            },
+            key_locator: None,
+        }
+    }
+
     pub fn try_decode(inner_bytes: &'a [u8]) -> Option<Self> {
         let mut offset = 0;
         let (signature_type_tlv, sig_type_len) = TLV::try_decode(inner_bytes).ok()?;
@@ -565,7 +609,7 @@ impl<'a> TlvEncode for SignatureInfo<'a> {
 pub type SignatureType = TypedInteger<27, u64>;
 
 impl SignatureType {
-    pub const SIGNATURE_TYPE_DIGEST_SHA256: u64 = 0;
+    pub const DIGEST_SHA256: u64 = 0;
     pub const SHA256_RSA: u64 = 1;
     pub const SHA256_ECDSA: u64 = 3;
     pub const HMAC_SHA256: u64 = 4;
