@@ -1,6 +1,5 @@
 use crate::{
-    face::{FaceError, FaceReceiver},
-    tlv::{DecodingError, VarintDecodingError, TLV},
+    face::{FaceError, FaceReceiver}, forwarder::MAX_PACKET_SIZE, tlv::{DecodingError, VarintDecodingError, TLV}
 };
 
 pub enum BufferedRecvError {
@@ -14,7 +13,7 @@ pub trait BufferedFaceReceiver {
     fn try_recv(&mut self) -> Result<TLV<'_>, BufferedRecvError>;
 }
 
-pub struct BufferedReceiver<FR: FaceReceiver, const CAPACITY: usize> {
+pub struct BufferedReceiver<FR: FaceReceiver, const CAPACITY: usize = MAX_PACKET_SIZE> {
     receiver: FR,
     receiver_buffer: [u8; CAPACITY],
     receiver_buffer_cursor: usize,
@@ -30,6 +29,10 @@ impl<FR: FaceReceiver, const CAPACITY: usize> BufferedReceiver<FR, CAPACITY> {
             pending_receiver_buffer_change: 0,
         }
     }
+}
+
+pub fn default_buffered_receiver<FR: FaceReceiver>(receiver: FR) -> BufferedReceiver<FR> {
+    BufferedReceiver::new(receiver)
 }
 
 impl<FR: FaceReceiver, const CAPACITY: usize> BufferedFaceReceiver

@@ -561,10 +561,10 @@ impl FaceEntry {
 mod tests {
     use crate::{
         face::{
-            buffered::{BufferedFaceReceiver, BufferedReceiver, BufferedRecvError},
-            local::local_face,
+            buffered::{default_buffered_receiver, BufferedFaceReceiver, BufferedRecvError},
+            local::default_local_face,
         },
-        forwarder::{Forwarder, InertMetrics, MAX_PACKET_SIZE},
+        forwarder::{Forwarder, InertMetrics},
         hash::Hasher,
         name::{Name, NameComponent},
         packet::{Data, Interest, SignatureInfo, SignatureValue},
@@ -581,13 +581,13 @@ mod tests {
         let tables = ReferenceTables::default();
 
         // Create two pairs of local faces (each "local face" needs a tx pair and rx pair)
-        let (fs1, face1receiver) = local_face::<MAX_PACKET_SIZE>();
-        let (mut face1sender, fr1) = local_face::<MAX_PACKET_SIZE>();
-        let (fs2, face2receiver) = local_face::<MAX_PACKET_SIZE>();
-        let (mut face2sender, fr2) = local_face::<MAX_PACKET_SIZE>();
+        let (fs1, face1receiver) = default_local_face();
+        let (mut face1sender, fr1) = default_local_face();
+        let (fs2, face2receiver) = default_local_face();
+        let (mut face2sender, fr2) = default_local_face();
 
-        let mut face1receiver = BufferedReceiver::<_, 88000>::new(face1receiver);
-        let mut face2receiver = BufferedReceiver::<_, 88000>::new(face2receiver);
+        let mut face1receiver = default_buffered_receiver(face1receiver);
+        let mut face2receiver = default_buffered_receiver(face2receiver);
 
         let mut forwarder = Forwarder::new(clock, hasher, metrics, tables);
 

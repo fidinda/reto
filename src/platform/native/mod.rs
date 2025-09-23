@@ -5,7 +5,10 @@ impl<const SIZE: usize> notifying::Notifying for crate::face::local::LocalReceiv
 
 pub mod shared;
 pub mod tcp;
-// TODO: UDP, unix datagram, unix stream
+pub mod udp;
+
+#[cfg(unix)]
+pub mod unix;
 
 pub mod forwarder;
 

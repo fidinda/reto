@@ -1,12 +1,14 @@
 use alloc::rc::Rc;
 use core::cell::RefCell;
 
-use crate::face::{FaceError, FaceReceiver, FaceSender};
+use crate::{face::{FaceError, FaceReceiver, FaceSender}, forwarder::MAX_PACKET_SIZE};
 
-pub struct LocalSender<const SIZE: usize> {
+pub const DEFAULT_RING_BUFFER_SIZE: usize = 10 * MAX_PACKET_SIZE;
+
+pub struct LocalSender<const SIZE: usize = DEFAULT_RING_BUFFER_SIZE> {
     inner: Rc<RefCell<RingBuffer<SIZE>>>,
 }
-pub struct LocalReceiver<const SIZE: usize> {
+pub struct LocalReceiver<const SIZE: usize = DEFAULT_RING_BUFFER_SIZE> {
     inner: Rc<RefCell<RingBuffer<SIZE>>>,
 }
 
@@ -19,6 +21,10 @@ pub fn local_face<const SIZE: usize>() -> (LocalSender<SIZE>, LocalReceiver<SIZE
     let receiver = LocalReceiver { inner };
 
     (sender, receiver)
+}
+
+pub fn default_local_face() -> (LocalSender, LocalReceiver) {
+    local_face()
 }
 
 impl<const SIZE: usize> FaceSender for LocalSender<SIZE> {

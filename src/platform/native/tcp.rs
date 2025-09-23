@@ -21,7 +21,7 @@ pub struct TcpReceiver {
 impl FaceSender for TcpSender {
     fn try_send(&mut self, src: &[u8]) -> Result<usize, FaceError> {
         match self.stream.write(src) {
-            Ok(usize) => Ok(usize),
+            Ok(bytes_sent) => Ok(bytes_sent),
             Err(io_err) => match io_err.kind() {
                 ErrorKind::WouldBlock => Ok(0),
                 _ => Err(FaceError::Disconnected),
@@ -33,7 +33,7 @@ impl FaceSender for TcpSender {
 impl FaceReceiver for TcpReceiver {
     fn try_recv(&mut self, dst: &mut [u8]) -> Result<usize, FaceError> {
         match self.stream.read(dst) {
-            Ok(usize) => Ok(usize),
+            Ok(bytes_received) => Ok(bytes_received),
             Err(io_err) => match io_err.kind() {
                 ErrorKind::WouldBlock => Ok(0),
                 _ => Err(FaceError::Disconnected),
