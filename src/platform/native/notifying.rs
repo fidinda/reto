@@ -33,7 +33,9 @@ impl Waker {
 //  - Using the system's internal polling mechanisms for socket-based networking
 //  - Using thread parking and waking
 pub trait Notifying {
-    fn socket_id(&self) -> Option<SocketId>;
+    fn socket_id(&self) -> Option<SocketId> {
+        None
+    }
 
-    fn register_waker(&mut self, waker: Waker);
+    fn register_waker(&mut self, _waker: Waker) {}
 }

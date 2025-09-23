@@ -53,9 +53,20 @@ impl<'a> TLV<'a> {
     pub fn val_as_u64(&self) -> Option<u64> {
         match self.val.len() {
             1 => Some(self.val[0] as u64),
-            2 => Some(u16::from_be_bytes(self.val.try_into().ok()?) as u64),
-            4 => Some(u32::from_be_bytes(self.val.try_into().ok()?) as u64),
-            8 => Some(u64::from_be_bytes(self.val.try_into().ok()?)),
+            2 => Some(u16::from_be_bytes([self.val[0], self.val[1]]) as u64),
+            4 => Some(
+                u32::from_be_bytes([self.val[0], self.val[1], self.val[2], self.val[3]]) as u64,
+            ),
+            8 => Some(u64::from_be_bytes([
+                self.val[0],
+                self.val[1],
+                self.val[2],
+                self.val[3],
+                self.val[4],
+                self.val[5],
+                self.val[6],
+                self.val[7],
+            ])),
             _ => None,
         }
     }
@@ -108,7 +119,7 @@ impl<'a> TLV<'a> {
                 if len < 3 {
                     return Err(VarintDecodingError::BufferTooShort);
                 }
-                let val = u16::from_be_bytes(bytes[1..3].try_into().unwrap());
+                let val = u16::from_be_bytes([bytes[1], bytes[2]]);
                 if val > 252 {
                     Ok((val as u64, 3))
                 } else {
@@ -119,7 +130,7 @@ impl<'a> TLV<'a> {
                 if len < 5 {
                     return Err(VarintDecodingError::BufferTooShort);
                 }
-                let val = u32::from_be_bytes(bytes[1..5].try_into().unwrap());
+                let val = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
                 if val > 65535 {
                     Ok((val as u64, 5))
                 } else {
@@ -130,7 +141,9 @@ impl<'a> TLV<'a> {
                 if len < 9 {
                     return Err(VarintDecodingError::BufferTooShort);
                 }
-                let val = u64::from_be_bytes(bytes[1..9].try_into().unwrap());
+                let val = u64::from_be_bytes([
+                    bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8],
+                ]);
                 if val > 4294967295 {
                     Ok((val, 9))
                 } else {

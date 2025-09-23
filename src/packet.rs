@@ -696,7 +696,7 @@ impl<'a> TlvEncode for KeyLocator<'a> {
 pub type KeyDigest<'a> = TypedBytes<'a, 29>;
 
 struct EncodedHasher<'a, H: Hasher> {
-    pub(crate) hasher: &'a mut H,
+    hasher: &'a mut H,
 }
 
 impl<'a, H: Hasher> crate::io::Write for EncodedHasher<'a, H> {
