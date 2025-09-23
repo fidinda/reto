@@ -10,6 +10,9 @@ mod web;
 #[cfg(all(feature = "std", target_arch = "wasm32"))]
 pub use web::*;
 
+#[cfg(all(feature = "std", feature = "websocket"))]
+pub mod websocket;
+
 #[cfg(feature = "sha2")]
 pub mod sha {
     use sha2::{Digest, Sha256};

@@ -1,6 +1,6 @@
 use std::{
     io::{Error, ErrorKind, Read, Write},
-    net::{TcpStream},
+    net::TcpStream,
 };
 
 use crate::face::{FaceError, FaceReceiver, FaceSender};
@@ -11,7 +11,7 @@ use super::notifying::SocketId;
 use super::notifying::Waker;
 
 pub struct TcpSender {
-     stream: TcpStream,
+    stream: TcpStream,
 }
 
 pub struct TcpReceiver {
@@ -48,7 +48,7 @@ impl Notifying for TcpReceiver {
         use std::os::fd::AsFd;
         Some(SocketId(self.stream.as_fd().try_clone_to_owned().ok()?))
     }
-    
+
     fn register_waker(&mut self, _waker: Waker) {}
 }
 
