@@ -1,5 +1,5 @@
 pub mod buffered;
-pub mod ringbuffer;
+
 pub mod local;
 
 #[derive(Debug, PartialEq, Eq)]

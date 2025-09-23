@@ -2,7 +2,7 @@ use core::num::NonZeroUsize;
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::{
-    face::{ringbuffer::RingBuffer, FaceError, FaceReceiver, FaceSender},
+    face::{local::RingBuffer, FaceError, FaceReceiver, FaceSender},
     platform::native::notifying::{Notifying, Waker},
 };
 
