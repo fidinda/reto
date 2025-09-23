@@ -1,6 +1,6 @@
-//mod datagram_face;
-
 pub mod buffered;
+pub mod ringbuffer;
+pub mod local;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum FaceError {

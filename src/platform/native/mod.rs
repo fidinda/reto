@@ -1,7 +1,9 @@
 mod clock;
 mod notifying;
 
-pub mod local;
+impl<const SIZE: usize> notifying::Notifying for crate::face::local::LocalReceiver<SIZE> {}
+
+pub mod shared;
 pub mod tcp;
 // TODO: UDP, unix datagram, unix stream
 
