@@ -1,3 +1,4 @@
+use core::net::IpAddr;
 use std::{
     io::{Error, ErrorKind},
     net::UdpSocket,
@@ -16,6 +17,7 @@ use super::notifying::Waker;
 pub struct UdpSender {
     socket: UdpSocket,
     buffer: Vec<u8>,
+    addr: (IpAddr, u16)
 }
 
 pub struct UdpReceiver {
@@ -29,7 +31,7 @@ impl FaceSender for UdpSender {
     }
 
     fn flush(&mut self) -> Result<(), FaceError> {
-        match self.socket.send(&self.buffer) {
+        match self.socket.send_to(&self.buffer, self.addr) {
             Ok(bytes_sent) => {
                 self.buffer.drain(..bytes_sent);
                 Ok(())
@@ -72,11 +74,12 @@ impl Notifying for UdpReceiver {
     }
 }
 
-pub fn udp_face(socket: UdpSocket) -> Result<(UdpSender, UdpReceiver), Error> {
+pub fn udp_face(socket: UdpSocket, remote_address: impl Into<IpAddr>, remote_port: u16) -> Result<(UdpSender, UdpReceiver), Error> {
     socket.set_nonblocking(true)?;
     let sender = UdpSender {
         socket: socket.try_clone()?,
         buffer: Vec::with_capacity(MAX_PACKET_SIZE),
+        addr: (remote_address.into(), remote_port),
     };
     let receiver = UdpReceiver { socket };
     Ok((sender, receiver))

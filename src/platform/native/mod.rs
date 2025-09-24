@@ -20,7 +20,7 @@ use crate::{
 };
 
 #[cfg(feature = "sha2")]
-type DefaultForwarder =
+pub type DefaultForwarder =
     BlockingForwarder<MonotonicClock, Sha256Hasher, InertMetrics, ReferenceTables>;
 
 #[cfg(feature = "sha2")]

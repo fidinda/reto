@@ -280,7 +280,10 @@ impl TableEntry {
             if let Some(index) = self.fib.iter().position(|y| y.next_hop == face) {
                 self.fib[index].cost = cost
             } else {
-                self.fib.push(FibEntry { cost, next_hop: face });
+                self.fib.push(FibEntry {
+                    cost,
+                    next_hop: face,
+                });
             }
             self.fib.sort();
         }
@@ -342,12 +345,19 @@ impl TableEntry {
     ) where
         I: Iterator<Item = NameComponent<'a>>,
     {
-        if let Some(component) = remaining_components.next() {
-            // There are more components, so we need to go to children
-            // We ignore the possible duplicates of faces along the way
-            //  and add the faces in reverse cost order
-            faces.extend(self.fib.iter().rev().map(|x| (x.cost, x.next_hop)));
+        // The task is twofold:
+        // - Register the interest in the necessary PIT so we know whom to
+        //      notify when we get the suitable data
+        // - Populate the "faces" array with faces we should _forward_ the interest to,
+        //      which in general can be any face that is in the prefix of the interest name.
 
+        // We are adding all the faces in this node's FIB to "faces" as they could be used to
+        //  to forward the interest. We ignore the possible duplicates of faces along the way
+        //  and add the faces in reverse cost order (assuming they are sorted in ascending cost in FIB).
+        faces.extend(self.fib.iter().rev().map(|x| (x.cost, x.next_hop)));
+
+        if let Some(component) = remaining_components.next() {
+            // There are more components, so we need to go to children to use their PIT
             let idx = match self
                 .children
                 .binary_search_by(|x| x.0.compare_to_name_component(component))
@@ -355,7 +365,7 @@ impl TableEntry {
                 Ok(idx) => idx,
                 Err(idx) => {
                     if faces.len() == 0 {
-                        // There are no valid faces on this path so we do not even try to create a PIT
+                        // There are no valid faces on this path so far so we do not even try to create a PIT
                         return;
                     }
                     self.insert_child(idx, component);
@@ -375,8 +385,12 @@ impl TableEntry {
                 faces,
             )
         } else {
-            // No more components, will work with this node's PIT
-            debug_assert!(faces.len() > 0);
+            // This is the final name component, will work with this node's PIT
+            
+            if faces.len() == 0 {
+                // There are no valid faces on this path so far so we do not even try to create a PIT
+                return;
+            }
 
             let relevant_pit = if can_be_prefix {
                 &mut self.pit_prefix
@@ -436,14 +450,14 @@ impl TableEntry {
             }
 
             // We next check if we should suppress this interest
-            let minumum_retransamission_delay = MIN_RETRANSMISSION_DELAY_MS
+            let minimum_retransamission_delay = MIN_RETRANSMISSION_DELAY_MS
                 * (1 << relevant_pit
                     .transmission_count
                     .min(MAX_RETRANSMISSION_DELAY_DOUBLINGS));
             if now
                 < relevant_pit
                     .latest_transmission_time
-                    .adding(minumum_retransamission_delay)
+                    .adding(minimum_retransamission_delay)
             {
                 // The interest is not forwarded due to retransmission suppression
                 faces.clear();
@@ -458,7 +472,7 @@ impl TableEntry {
             //  that FIB is stable, but changes to FIB are not critical for correctness.
             relevant_pit.latest_transmission_time = now;
             relevant_pit.transmission_count += 1;
-            // We go through all faces one by one _from the end_.
+            // We go through all faces one by one _from the end_ wrapping around the list as needed.
             let face_idx =
                 faces.len() - 1 - (relevant_pit.transmission_count as usize % faces.len());
             let reply_to = faces[face_idx];
@@ -514,8 +528,7 @@ impl TableEntry {
             if self.children.len() > 0 {
                 // Try for full name as well
                 let digest = digest_computation();
-                let component =
-                    NameComponent::new_implicit(&digest);
+                let component = NameComponent::new_implicit(&digest);
                 let idx = if let Some(child) = self.get_child(component) {
                     child.0.satisfy_interests(
                         name,
@@ -564,9 +577,7 @@ impl TableEntry {
             );
         } else {
             // We get to the implicit digest component
-            let child = self.get_or_insert_child(
-                NameComponent::new_implicit(digest.as_slice()),
-            );
+            let child = self.get_or_insert_child(NameComponent::new_implicit(digest.as_slice()));
             match child.data.as_mut() {
                 Some(entry) => {
                     debug_assert!(packet == entry.data.as_ref());
@@ -864,7 +875,7 @@ impl DeadNonceList {
 }
 
 const DEFAULT_DEADLINE_INCREMENT_MS: u64 = 4000; // 4 sec
-                                        
+
 //const RETRANSMISSION_PERIOD_MS: u64 = 1000; // 1 sec
 
 const MIN_RETRANSMISSION_DELAY_MS: u64 = 8;
