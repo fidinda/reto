@@ -55,8 +55,8 @@ impl Notifying for TcpReceiver {
 #[cfg(target_os = "windows")]
 impl Notifying for TcpReceiver {
     fn socket_id(&self) -> Option<SocketId> {
-        use std::os::fd::AsHandle;
-        Some(SocketId(self.stream.as_handle().try_clone_to_owned().ok()?))
+        use std::os::windows::io::AsSocket;
+        Some(SocketId(self.stream.as_socket().try_clone_to_owned().ok()?))
     }
 }
 

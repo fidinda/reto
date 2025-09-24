@@ -4,7 +4,7 @@ use crate::{forwarder::FaceToken, platform::forwarder::FaceQueue};
 
 pub struct SocketId(
     #[cfg(any(unix, target_os = "hermit"))] pub(crate) std::os::fd::OwnedFd,
-    #[cfg(windows)] std::os::windows::io::OwnedHandle,
+    #[cfg(windows)] pub(crate) std::os::windows::io::OwnedSocket,
 );
 
 pub struct Waker {

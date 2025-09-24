@@ -69,8 +69,8 @@ impl Notifying for UdpReceiver {
 #[cfg(target_os = "windows")]
 impl Notifying for UdpReceiver {
     fn socket_id(&self) -> Option<SocketId> {
-        use std::os::fd::AsHandle;
-        Some(SocketId(self.socket.as_handle().try_clone_to_owned().ok()?))
+        use std::os::windows::io::AsSocket;
+        Some(SocketId(self.socket.as_socket().try_clone_to_owned().ok()?))
     }
 }
 

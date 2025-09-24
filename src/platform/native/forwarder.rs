@@ -373,32 +373,28 @@ mod poller {
     impl SocketId {
         fn raw_source(&self) -> RawFd {
             use std::os::fd::AsRawFd;
-
             self.0.as_raw_fd()
         }
 
         fn source(&self) -> BorrowedFd<'_> {
             use std::os::fd::AsFd;
-
             self.0.as_fd()
         }
     }
 
     #[cfg(target_os = "windows")]
-    use std::os::fd::{BorrowedHandle, RawHandle};
+    use std::os::windows::io::{BorrowedSocket, RawSocket};
 
     #[cfg(target_os = "windows")]
     impl SocketId {
-        fn raw_source(&self) -> RawHandle {
-            use std::os::fd::AsRawHandle;
-
-            self.0.as_raw_handle()
+        fn raw_source(&self) -> RawSocket {
+            use std::os::windows::io::AsRawSocket;
+            self.0.as_raw_socket()
         }
 
-        fn source(&self) -> BorrowedHandle<'_> {
-            use std::os::fd::AsHandle;
-
-            self.0.as_handle()
+        fn source(&self) -> BorrowedSocket<'_> {
+            use std::os::windows::io::AsSocket;
+            self.0.as_socket()
         }
     }
 }
