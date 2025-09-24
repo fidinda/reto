@@ -37,16 +37,19 @@ Many of the aspects need for the actual applications, such as name space constru
 ## Example
 
 The following example takes a local port, remote IP+port, and a name prefix as arguments.
+
 It then creates a forwarder and two faces: 
 - UDP based on the port and IP information above
 - Local face that is based on two pairs of "channels": one side is given to the forwarder and one side remains in the application.
+
 The local face is then registered for name prefix that was given as an argument. This means that if the forwarder receives an interest with this name prefix it will forward it to the local face.
 Finally, we launch the forwarding loop and check if we have received an interest on the local face. If so, we create a simple data packet with the same name as the interest and the "Reto Data" payload. We then "sign" the packet using SHA256 and respond back to the forwarder.
+
 If the interest with the same name arrives at the forwarder within 10 seconds (and adjustable parameter), it will be satisfied directly from the forwarder's cache without the need to send the interest to the local face.
 
 More information is in the examples folder.
 
-```
+```rust
 fn main() -> std::io::Result<()> {
     let own_port = std::env::args().nth(1).unwrap();
     let remote_address = std::env::args().nth(2).unwrap();
