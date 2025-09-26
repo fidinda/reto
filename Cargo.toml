@@ -24,3 +24,6 @@ websocket = ["std", "dep:ewebsock"]
 ewebsock = {version = "0.8.0", optional = true }
 polling = {version = "3.10.0", optional = true }
 sha2 = {version = "0.10.9", optional = true }
+
+[profile.release]
+debug = true

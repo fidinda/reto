@@ -32,6 +32,7 @@ where
     shared_queue: FaceQueue,
     forwarding_thread: Thread,
     poller_sender: Sender<PollerMessage>,
+    socket_faces: Vec<FaceToken>,
     _marker: PhantomData<*const ()>, // !Send
 }
 
@@ -60,7 +61,7 @@ where
 
             // This is the timeout that we wait while polling
             //  (and the latency with which we process register/unregister messages)
-            let timeout = Some(Duration::from_millis(10));
+            let timeout = Some(Duration::from_millis(100));
 
             'poll: loop {
                 'recv: loop {
@@ -92,6 +93,7 @@ where
             shared_queue,
             forwarding_thread,
             poller_sender,
+            socket_faces: Vec::new(),
             _marker: PhantomData::default(),
         }
     }
@@ -108,6 +110,8 @@ where
             let _ = self
                 .poller_sender
                 .send(PollerMessage::Register { face, socket });
+            self.socket_faces.push(face);
+            self.socket_faces.sort();
         }
 
         // Also register a waker, whcih will usually be a noop for socket faces
@@ -130,6 +134,9 @@ where
         let _ = self
             .poller_sender
             .send(PollerMessage::Unregister { face: token });
+        if let Ok(index) = self.socket_faces.binary_search(&token) {
+            self.socket_faces.remove(index);
+        }
         self.forwarder.remove_face(token)
     }
 
@@ -166,7 +173,7 @@ where
             }
 
             // Then we try to forward on any face in the forwarder, including the non-notifying
-            match self.forwarder.try_forward_from_any_face() {
+            match self.forwarder.try_forward_from_any_face(&self.socket_faces) {
                 Ok(face) => return Ok(face),
                 Err(ForwarderError::NothingToForward) => {}
                 Err(err) => return Err(err),

@@ -127,10 +127,13 @@ where
         ret
     }
 
-    pub fn try_forward_from_any_face(&mut self) -> Result<FaceToken, ForwarderError> {
+    pub fn try_forward_from_any_face(&mut self, excluded: &[FaceToken]) -> Result<FaceToken, ForwarderError> {
         let mut ret = Err(ForwarderError::NothingToForward);
         for _ in 0..self.faces.len() {
             self.last_checked_face = (self.last_checked_face + 1) % self.faces.len();
+            if excluded.contains(&FaceToken(self.faces.faces[self.last_checked_face].0)) {
+                continue
+            }
             if self.try_recv_from_face_at_index(self.last_checked_face)? {
                 ret = Ok(FaceToken(self.faces.faces[self.last_checked_face].0));
                 break;
@@ -605,7 +608,7 @@ mod tests {
 
         assert!(interest.encode(&mut face1sender).is_ok());
 
-        match forwarder.try_forward_from_any_face() {
+        match forwarder.try_forward_from_any_face(&[]) {
             Ok(ff) => assert_eq!(ff, face1),
             Err(_) => panic!(),
         }
@@ -643,7 +646,7 @@ mod tests {
             }
         }
 
-        match forwarder.try_forward_from_any_face() {
+        match forwarder.try_forward_from_any_face(&[]) {
             Ok(ff) => assert_eq!(ff, face2),
             Err(_) => panic!(),
         }

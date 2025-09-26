@@ -40,15 +40,19 @@ pub struct ReferenceTables {
     dead_nonce_list: DeadNonceList,
     data_cache_duration_ms: u64,
     face_scratchpad: Vec<(u32, FaceToken)>,
+    prune_interval_ms: u64,
+    last_prune_time: Timestamp,
 }
 
 impl ReferenceTables {
-    pub fn new(data_cache_duration_ms: u32, dead_nonce_duration_ms: u32) -> Self {
+    pub fn new(data_cache_duration_ms: u32, dead_nonce_duration_ms: u32, prune_interval_ms: u32) -> Self {
         Self {
             root: TableEntry::new(),
             dead_nonce_list: DeadNonceList::new(dead_nonce_duration_ms as u64),
             data_cache_duration_ms: data_cache_duration_ms as u64,
             face_scratchpad: Default::default(),
+            prune_interval_ms: prune_interval_ms as u64,
+            last_prune_time: Timestamp { ms_since_1970: 0 },
         }
     }
 
@@ -59,7 +63,7 @@ impl ReferenceTables {
 
 impl Default for ReferenceTables {
     fn default() -> Self {
-        Self::new(10 * 1000, 6 * 1000)
+        Self::new(10 * 1000, 6 * 1000, 1000)
     }
 }
 
@@ -70,18 +74,20 @@ impl Tables for ReferenceTables {
     }
 
     fn prune_if_needed(&mut self, now: Timestamp) {
-        self.root
+        if self.last_prune_time.adding(self.prune_interval_ms) < now {
+             self.root
             .prune_if_needed(Name::new(), now, &mut self.dead_nonce_list);
-        self.dead_nonce_list.prune(now);
+            self.dead_nonce_list.prune(now);
 
-        // TODO: Maybe need to have metrics here? Or return number of removed data/intrests
+            // TODO: Maybe need to have metrics here? Or return number of removed data/intrests
 
-        // TODO: we could check the CS count here and if it is too big
-        //  could prune with now = (actual_now - 0.5 * data_cache_duration_ms), then 0.75, etc.
+            // TODO: we could check the CS count here and if it is too big
+            //  could prune with now = (actual_now - 0.5 * data_cache_duration_ms), then 0.75, etc.
 
-        // LRU cache policy LRU cache policy implements the Least Recently Used cache replacement algorithm, which discards the least recently used items first. LRU evicts upon every insertion, because its performance is more predictable; the alternative, periodic cleanup of a batch of entries, can cause jitter in packet forwarding.
-        // LRU uses one queue to keep track of data usage in CS. The Table iterator is stored in the queue. At any time, when an entry is used or refreshed, its Table iterator is relocated to the tail of the queue. Also, when an entry is newly inserted, its Table iterator is pushed at the tail of the queue. When an entry needs to be evicted, its Table iterator is erased from the head of its queue, and the entry is erased from the Table.
-        // Could be done if we store Rc<child> and store those in some queue
+            // LRU cache policy LRU cache policy implements the Least Recently Used cache replacement algorithm, which discards the least recently used items first. LRU evicts upon every insertion, because its performance is more predictable; the alternative, periodic cleanup of a batch of entries, can cause jitter in packet forwarding.
+            // LRU uses one queue to keep track of data usage in CS. The Table iterator is stored in the queue. At any time, when an entry is used or refreshed, its Table iterator is relocated to the tail of the queue. Also, when an entry is newly inserted, its Table iterator is pushed at the tail of the queue. When an entry needs to be evicted, its Table iterator is erased from the head of its queue, and the entry is erased from the Table.
+            // Could be done if we store Rc<child> and store those in some queue
+        }
     }
 
     fn register_prefix(&mut self, name_prefix: Name<'_>, face: FaceToken, cost: u32) {

@@ -82,7 +82,7 @@ fn main() -> std::io::Result<()> {
             _ => panic!(),
         }
 
-        match forwarder.forward(Some(Duration::from_millis(1))) {
+        match forwarder.forward(Some(Duration::from_millis(10))) {
             Ok(face) => {
                 println!("Received on face {:?}", face);
             }
