@@ -10,10 +10,11 @@ use reto::{
     },
     forwarder::ForwarderError,
     hash::Hasher,
+    io::Encode,
     name::{Name, NameComponent},
     packet::{Data, Interest},
     platform::{sha::Sha256Hasher, udp::udp_face, DefaultForwarder},
-    tlv::{Encode, TlvEncode},
+    tlv::{TlvDecode, TlvEncode},
 };
 
 // This is the analogue of and can be used in place of
@@ -56,7 +57,7 @@ fn main() -> std::io::Result<()> {
         match face1receiver.try_recv() {
             Ok(tlv) => {
                 if tlv.typ.get() == Data::TLV_TYPE {
-                    let data = Data::try_decode(tlv.val).unwrap();
+                    let data = Data::try_decode_from_inner(tlv.val).unwrap();
 
                     println!(
                         "Got data with {} components",

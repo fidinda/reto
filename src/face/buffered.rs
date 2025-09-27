@@ -1,11 +1,14 @@
 use crate::{
-    face::{FaceError, FaceReceiver}, forwarder::MAX_PACKET_SIZE, tlv::{DecodingError, VarintDecodingError, TLV}
+    face::{FaceError, FaceReceiver},
+    forwarder::MAX_PACKET_SIZE,
+    io::Decode,
+    tlv::{TlvDecodingError, VarintDecodingError, TLV},
 };
 
 pub enum BufferedRecvError {
     NothingReceived,
     TlvTooBig(usize),
-    DecodingError(DecodingError),
+    DecodingError(TlvDecodingError),
     FaceError(FaceError),
 }
 
@@ -70,14 +73,14 @@ impl<FR: FaceReceiver, const CAPACITY: usize> BufferedFaceReceiver
             match TLV::try_decode(&self.receiver_buffer[0..self.receiver_buffer_cursor]) {
                 Ok((tlv, tlv_len)) => (tlv, tlv_len),
                 // If we have too few bytes this could be solved with a recv
-                Err(DecodingError::CannotDecodeType {
+                Err(TlvDecodingError::CannotDecodeType {
                     err: VarintDecodingError::BufferTooShort,
                 }) => return Err(BufferedRecvError::NothingReceived),
-                Err(DecodingError::CannotDecodeLength {
+                Err(TlvDecodingError::CannotDecodeLength {
                     err: VarintDecodingError::BufferTooShort,
                     ..
                 }) => return Err(BufferedRecvError::NothingReceived),
-                Err(DecodingError::CannotDecodeValue { len, .. }) => {
+                Err(TlvDecodingError::CannotDecodeValue { len, .. }) => {
                     if len > CAPACITY {
                         return Err(BufferedRecvError::TlvTooBig(len));
                     }

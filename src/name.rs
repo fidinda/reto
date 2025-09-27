@@ -1,8 +1,8 @@
 use core::num::NonZeroU16;
 
 use crate::{
-    io::Write,
-    tlv::{Encode, TlvEncode, TLV},
+    io::{Decode, Encode, Write},
+    tlv::{TlvDecode, TlvEncode, TLV},
 };
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -53,11 +53,19 @@ impl<'a> NameComponent<'a> {
 
 impl<'a> Encode for NameComponent<'a> {
     fn encoded_length(&self) -> usize {
-        TLV { typ: self.typ.into(), val: self.bytes }.encoded_length()
+        TLV {
+            typ: self.typ.into(),
+            val: self.bytes,
+        }
+        .encoded_length()
     }
 
     fn encode<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
-        TLV { typ: self.typ.into(), val: self.bytes }.encode(writer)
+        TLV {
+            typ: self.typ.into(),
+            val: self.bytes,
+        }
+        .encode(writer)
     }
 }
 
@@ -71,33 +79,6 @@ impl<'a> Name<'a> {
         Self {
             inner: NameInner::Empty,
         }
-    }
-
-    pub fn try_decode(inner_bytes: &'a [u8]) -> Option<Self> {
-        let mut component_count = 0;
-        let mut offset = 0;
-        while offset < inner_bytes.len() {
-            let (nc_tlv, nc_len) = TLV::try_decode(&inner_bytes[offset..]).ok()?;
-            let _: NonZeroU16 = nc_tlv.typ.try_into().ok()?;
-            component_count += 1;
-            offset += nc_len;
-        }
-
-        if offset != inner_bytes.len() {
-            return None;
-        }
-
-        let inner = if component_count == 0 {
-            NameInner::Empty
-        } else {
-            NameInner::Buffer {
-                component_bytes: inner_bytes,
-                component_count,
-                original_count: component_count,
-            }
-        };
-
-        Some(Name { inner })
     }
 
     pub fn component_count(&self) -> usize {
@@ -185,12 +166,11 @@ impl<'a> Name<'a> {
             }
         }
     }
-
 }
 
 impl<'a> TlvEncode for Name<'a> {
     const TLV_TYPE: u32 = 7;
-    
+
     fn inner_length(&self) -> usize {
         match self.inner {
             NameInner::Empty => 0,
@@ -228,7 +208,7 @@ impl<'a> TlvEncode for Name<'a> {
             }
         }
     }
-    
+
     fn encode_inner<W: Write + ?Sized>(&self, writer: &mut W) -> Result<(), W::Error> {
         match self.inner {
             NameInner::Empty => Ok(()),
@@ -266,6 +246,35 @@ impl<'a> TlvEncode for Name<'a> {
                 tlv.encode(writer)
             }
         }
+    }
+}
+
+impl<'a> TlvDecode<'a> for Name<'a> {
+    fn try_decode_from_inner(inner_bytes: &'a [u8]) -> Option<Name<'a>> {
+        let mut component_count = 0;
+        let mut offset = 0;
+        while offset < inner_bytes.len() {
+            let (nc_tlv, nc_len) = TLV::try_decode(&inner_bytes[offset..]).ok()?;
+            let _: NonZeroU16 = nc_tlv.typ.try_into().ok()?;
+            component_count += 1;
+            offset += nc_len;
+        }
+
+        if offset != inner_bytes.len() {
+            return None;
+        }
+
+        let inner = if component_count == 0 {
+            NameInner::Empty
+        } else {
+            NameInner::Buffer {
+                component_bytes: inner_bytes,
+                component_count,
+                original_count: component_count,
+            }
+        };
+
+        Some(Name { inner })
     }
 }
 
@@ -340,8 +349,9 @@ impl<'a> Iterator for NameComponentIterator<'a> {
 #[cfg(test)]
 mod tests {
     use crate::{
+        io::{Decode, Encode},
         name::{Name, NameComponent},
-        tlv::{Encode, TlvEncode, TLV},
+        tlv::{TlvDecode, TlvEncode, TLV},
     };
 
     #[test]
@@ -423,14 +433,14 @@ mod tests {
     #[test]
     fn test_decoding() {
         let inner_bytes = &[];
-        let name = Name::try_decode(inner_bytes);
+        let name = Name::try_decode_from_inner(inner_bytes);
         assert!(name.is_some());
         let name = name.unwrap();
         assert!(name.component_count() == 0);
         assert!(name.components().next().is_none());
 
         let inner_bytes = &[8, 0];
-        let name = Name::try_decode(inner_bytes);
+        let name = Name::try_decode_from_inner(inner_bytes);
         assert!(name.is_some());
         let name = name.unwrap();
         assert!(name.component_count() == 1);
@@ -443,7 +453,7 @@ mod tests {
         assert!(nc.next().is_none());
 
         let inner_bytes = &[8, 5, b'h', b'e', b'l', b'l', b'o'];
-        let name = Name::try_decode(inner_bytes);
+        let name = Name::try_decode_from_inner(inner_bytes);
         assert!(name.is_some());
         let name = name.unwrap();
         assert!(name.component_count() == 1);
@@ -466,7 +476,7 @@ mod tests {
         let inner_bytes = &[
             8, 5, b'h', b'e', b'l', b'l', b'o', 1, 5, b'w', b'o', b'r', b'l', b'd',
         ];
-        let name = Name::try_decode(inner_bytes);
+        let name = Name::try_decode_from_inner(inner_bytes);
         assert!(name.is_some());
         let name = name.unwrap();
         assert!(name.component_count() == 2);
@@ -570,23 +580,23 @@ mod tests {
         let inner_bytes = &[
             8, 5, b'h', b'e', b'l', b'l', b'o', 0, 5, b'w', b'o', b'r', b'l', b'd',
         ];
-        let name = Name::try_decode(inner_bytes);
+        let name = Name::try_decode_from_inner(inner_bytes);
         assert!(name.is_none());
 
         let inner_bytes = &[
             8, 5, b'h', b'e', b'l', b'l', b'o', 1, 6, b'w', b'o', b'r', b'l', b'd',
         ];
-        let name = Name::try_decode(inner_bytes);
+        let name = Name::try_decode_from_inner(inner_bytes);
         assert!(name.is_none());
 
         let inner_bytes = &[
             8, 5, b'h', b'e', b'l', b'l', b'o', 0, 5, b'w', b'o', b'r', b'l', b'd', 1,
         ];
-        let name = Name::try_decode(inner_bytes);
+        let name = Name::try_decode_from_inner(inner_bytes);
         assert!(name.is_none());
 
         let inner_bytes = &[253, 251, 252, 0];
-        let name = Name::try_decode(inner_bytes);
+        let name = Name::try_decode_from_inner(inner_bytes);
         assert!(name.is_some());
         let name = name.unwrap();
         assert!(name.component_count() == 1);
@@ -599,7 +609,7 @@ mod tests {
         assert!(nc.next().is_none());
 
         let inner_bytes = &[254, 251, 252, 253, 254, 0];
-        let name = Name::try_decode(inner_bytes);
+        let name = Name::try_decode_from_inner(inner_bytes);
         assert!(name.is_none());
     }
 
@@ -614,7 +624,7 @@ mod tests {
             7, 14, 8, 5, b'h', b'e', b'l', b'l', b'o', 1, 5, b'w', b'o', b'r', b'l', b'd',
         ];
 
-        let name = Name::try_decode(inner_bytes);
+        let name = Name::try_decode_from_inner(inner_bytes);
         assert!(name.is_some());
         let name = name.unwrap();
         assert!(name.component_count() == 2);

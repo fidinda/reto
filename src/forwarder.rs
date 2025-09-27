@@ -4,11 +4,11 @@ use crate::{
     clock::Clock,
     face::{FaceError, FaceReceiver, FaceSender},
     hash::{Hasher, Sha256Digest},
-    io::Write,
+    io::{Decode, Write},
     name::Name,
     packet::{Data, Interest},
     tables::Tables,
-    tlv::{DecodingError, TlvEncode, VarintDecodingError, TLV},
+    tlv::{TlvDecode, TlvDecodingError, TlvEncode, VarintDecodingError, TLV},
 };
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -18,7 +18,7 @@ pub enum ForwarderError {
     NothingToForward,
     FaceNotfound,
     FaceDisconnected(FaceToken),
-    FaceUnrecoverableError(FaceToken, DecodingError),
+    FaceUnrecoverableError(FaceToken, TlvDecodingError),
 }
 
 pub trait ForwarderMetrics {
@@ -127,12 +127,15 @@ where
         ret
     }
 
-    pub fn try_forward_from_any_face(&mut self, excluded: &[FaceToken]) -> Result<FaceToken, ForwarderError> {
+    pub fn try_forward_from_any_face(
+        &mut self,
+        excluded: &[FaceToken],
+    ) -> Result<FaceToken, ForwarderError> {
         let mut ret = Err(ForwarderError::NothingToForward);
         for _ in 0..self.faces.len() {
             self.last_checked_face = (self.last_checked_face + 1) % self.faces.len();
             if excluded.contains(&FaceToken(self.faces.faces[self.last_checked_face].0)) {
-                continue
+                continue;
             }
             if self.try_recv_from_face_at_index(self.last_checked_face)? {
                 ret = Ok(FaceToken(self.faces.faces[self.last_checked_face].0));
@@ -161,14 +164,14 @@ where
             match TLV::try_decode(&recv_buffer[0..*recv_buffer_cursor]) {
                 Ok(_) => should_try_recv = false,
                 // If we have too few bytes this could be solved with a recv
-                Err(DecodingError::CannotDecodeType {
+                Err(TlvDecodingError::CannotDecodeType {
                     err: VarintDecodingError::BufferTooShort,
                 }) => {}
-                Err(DecodingError::CannotDecodeLength {
+                Err(TlvDecodingError::CannotDecodeLength {
                     err: VarintDecodingError::BufferTooShort,
                     ..
                 }) => {}
-                Err(DecodingError::CannotDecodeValue { .. }) => {}
+                Err(TlvDecodingError::CannotDecodeValue { .. }) => {}
                 Err(err) => return Err(ForwarderError::FaceUnrecoverableError(origin, err)),
             }
         }
@@ -189,14 +192,14 @@ where
         let (tlv, tlv_len) = match TLV::try_decode(&recv_buffer[0..*recv_buffer_cursor]) {
             Ok((tlv, tlv_len)) => (tlv, tlv_len),
             // If we have too few bytes this could be solved with a recv
-            Err(DecodingError::CannotDecodeType {
+            Err(TlvDecodingError::CannotDecodeType {
                 err: VarintDecodingError::BufferTooShort,
             }) => return Ok(false),
-            Err(DecodingError::CannotDecodeLength {
+            Err(TlvDecodingError::CannotDecodeLength {
                 err: VarintDecodingError::BufferTooShort,
                 ..
             }) => return Ok(false),
-            Err(DecodingError::CannotDecodeValue { len, .. }) => {
+            Err(TlvDecodingError::CannotDecodeValue { len, .. }) => {
                 if len > MAX_PACKET_SIZE {
                     // TODO: should skip too-large packets, probably
                 }
@@ -210,7 +213,7 @@ where
         match tlv.typ.get() {
             Interest::TLV_TYPE => {
                 // Handle interest
-                if let Some(interest) = Interest::try_decode(tlv.val) {
+                if let Some(interest) = Interest::try_decode_from_inner(tlv.val) {
                     Self::handle_interest(
                         interest,
                         &recv_buffer[0..tlv_len],
@@ -228,7 +231,7 @@ where
             }
             Data::TLV_TYPE => {
                 // Handle data
-                if let Some(data) = Data::try_decode(tlv.val) {
+                if let Some(data) = Data::try_decode_from_inner(tlv.val) {
                     Self::handle_data(
                         data,
                         &recv_buffer[0..tlv_len],
@@ -569,11 +572,12 @@ mod tests {
         },
         forwarder::{Forwarder, InertMetrics},
         hash::Hasher,
+        io::Encode,
         name::{Name, NameComponent},
         packet::{Data, Interest, SignatureInfo, SignatureValue},
         platform::sha::Sha256Hasher,
         tables::reference::ReferenceTables,
-        tlv::{Encode, TlvEncode},
+        tlv::{TlvDecode, TlvEncode},
     };
 
     #[test]
@@ -617,7 +621,7 @@ mod tests {
             match face2receiver.try_recv() {
                 Ok(tlv) => {
                     assert_eq!(tlv.typ.get(), Interest::TLV_TYPE);
-                    let received_interest = Interest::try_decode(tlv.val).unwrap();
+                    let received_interest = Interest::try_decode_from_inner(tlv.val).unwrap();
                     assert_eq!(
                         interest.name.component_count(),
                         received_interest.name.component_count()
@@ -655,7 +659,7 @@ mod tests {
             match face1receiver.try_recv() {
                 Ok(tlv) => {
                     assert_eq!(tlv.typ.get(), Data::TLV_TYPE);
-                    let received_data = Data::try_decode(tlv.val).unwrap();
+                    let received_data = Data::try_decode_from_inner(tlv.val).unwrap();
                     assert_eq!(received_data.content.unwrap().bytes, b"v0.3");
 
                     let mut hasher = Sha256Hasher::new();

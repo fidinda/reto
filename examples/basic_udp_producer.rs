@@ -10,10 +10,11 @@ use reto::{
     },
     forwarder::ForwarderError,
     hash::Hasher,
+    io::Encode,
     name::{Name, NameComponent},
     packet::{Data, Interest, SignatureInfo, SignatureValue},
     platform::{sha::Sha256Hasher, udp::udp_face, DefaultForwarder},
-    tlv::{Encode, TlvEncode},
+    tlv::{TlvDecode, TlvEncode},
 };
 
 // This is the analogue of and can be used in place of
@@ -53,7 +54,7 @@ fn main() -> std::io::Result<()> {
         match face1receiver.try_recv() {
             Ok(tlv) => {
                 if tlv.typ.get() == Interest::TLV_TYPE {
-                    let interest = Interest::try_decode(tlv.val).unwrap();
+                    let interest = Interest::try_decode_from_inner(tlv.val).unwrap();
 
                     println!(
                         "Got interest with {} components",
