@@ -1,8 +1,14 @@
-use core::num::NonZeroUsize;
-use std::sync::{Arc, Condvar, Mutex};
+use core::{num::NonZeroUsize, time::Duration};
+use std::{
+    sync::{Arc, Condvar, Mutex},
+    time::Instant,
+};
 
 use crate::{
-    face::{local::RingBuffer, FaceError, FaceReceiver, FaceSender},
+    face::{
+        local::RingBuffer, BlockingFaceReceiver, BlockingFaceSender, FaceError, FaceReceiver,
+        FaceSender,
+    },
     platform::native::notifying::{Notifying, Waker},
 };
 
@@ -27,8 +33,12 @@ pub fn shared_face<const SIZE: usize>() -> (SharedSender<SIZE>, SharedReceiver<S
     (sender, receiver)
 }
 
-impl<const SIZE: usize> SharedReceiver<SIZE> {
-    pub fn recv(&mut self, dst: &mut [u8]) -> Result<NonZeroUsize, FaceError> {
+impl<const SIZE: usize> BlockingFaceReceiver for SharedReceiver<SIZE> {
+    fn recv(&mut self, dst: &mut [u8], timeout: Option<Duration>) -> Result<usize, FaceError> {
+        if dst.len() == 0 {
+            return Ok(0);
+        }
+
         let mut ring = self
             .inner
             .ring
@@ -38,13 +48,26 @@ impl<const SIZE: usize> SharedReceiver<SIZE> {
         loop {
             let read_bytes = ring.0.read(dst);
             match NonZeroUsize::new(read_bytes) {
-                Some(read) => return Ok(read),
+                Some(read) => return Ok(read.get()),
                 None => {
-                    ring = self
-                        .inner
-                        .available
-                        .wait(ring)
-                        .map_err(|_| FaceError::Disconnected)?
+                    ring = match timeout {
+                        Some(timeout) => {
+                            let (m, r) = self
+                                .inner
+                                .available
+                                .wait_timeout(ring, timeout)
+                                .map_err(|_| FaceError::Disconnected)?;
+                            if r.timed_out() {
+                                return Ok(0);
+                            }
+                            m
+                        }
+                        None => self
+                            .inner
+                            .available
+                            .wait(ring)
+                            .map_err(|_| FaceError::Disconnected)?,
+                    }
                 }
             }
         }
@@ -76,6 +99,50 @@ impl<const SIZE: usize> FaceSender for SharedSender<SIZE> {
 
         if bytes_written > 0 {
             self.inner.available.notify_one();
+        }
+
+        Ok(bytes_written)
+    }
+}
+
+impl<const SIZE: usize> BlockingFaceSender for SharedSender<SIZE> {
+    fn send(&mut self, src: &[u8], timeout: Option<Duration>) -> Result<usize, FaceError> {
+        if Arc::strong_count(&self.inner) <= 1 {
+            return Err(FaceError::Disconnected);
+        }
+
+        let start = Instant::now();
+
+        let mut bytes_written = 0;
+
+        while bytes_written < src.len() {
+            bytes_written += {
+                let mut g = self
+                    .inner
+                    .ring
+                    .lock()
+                    .map_err(|_| FaceError::Disconnected)?;
+
+                let bytes_written = g.0.write(src);
+
+                if let Some(waker) = &g.1 {
+                    if bytes_written > 0 {
+                        waker.notify();
+                    }
+                }
+
+                if bytes_written > 0 {
+                    self.inner.available.notify_one();
+                }
+
+                bytes_written
+            };
+
+            if let Some(timeout) = timeout {
+                if Instant::now().duration_since(start) >= timeout {
+                    break;
+                }
+            }
         }
 
         Ok(bytes_written)

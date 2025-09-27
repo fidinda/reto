@@ -1,5 +1,8 @@
+use core::time::Duration;
+use std::time::Instant;
+
 use crate::{
-    face::{FaceError, FaceReceiver},
+    face::{BlockingFaceReceiver, FaceError, FaceReceiver},
     forwarder::MAX_PACKET_SIZE,
     io::Decode,
     tlv::{TlvDecodingError, VarintDecodingError, TLV},
@@ -14,6 +17,10 @@ pub enum BufferedRecvError {
 
 pub trait BufferedFaceReceiver {
     fn try_recv(&mut self) -> Result<TLV<'_>, BufferedRecvError>;
+}
+
+pub trait BufferedBlockingFaceReceiver {
+    fn recv(&mut self, timeout: Option<Duration>) -> Result<TLV<'_>, BufferedRecvError>;
 }
 
 pub struct BufferedReceiver<FR: FaceReceiver, const CAPACITY: usize = MAX_PACKET_SIZE> {
@@ -94,5 +101,100 @@ impl<FR: FaceReceiver, const CAPACITY: usize> BufferedFaceReceiver
         self.pending_receiver_buffer_change = tlv_len;
 
         Ok(tlv)
+    }
+}
+
+pub struct BufferedBlockingReceiver<
+    FR: BlockingFaceReceiver,
+    const CAPACITY: usize = MAX_PACKET_SIZE,
+> {
+    receiver: FR,
+    receiver_buffer: [u8; CAPACITY],
+    receiver_buffer_cursor: usize,
+    pending_receiver_buffer_change: usize,
+}
+
+impl<FR: BlockingFaceReceiver, const CAPACITY: usize> BufferedBlockingReceiver<FR, CAPACITY> {
+    pub fn new(receiver: FR) -> Self {
+        Self {
+            receiver,
+            receiver_buffer: [0; CAPACITY],
+            receiver_buffer_cursor: 0,
+            pending_receiver_buffer_change: 0,
+        }
+    }
+}
+
+impl<FR: BlockingFaceReceiver, const CAPACITY: usize> BufferedBlockingFaceReceiver
+    for BufferedBlockingReceiver<FR, CAPACITY>
+{
+    fn recv(&mut self, timeout: Option<Duration>) -> Result<TLV<'_>, BufferedRecvError> {
+        // Reset the cursor back by the size of the last processed element, if any
+        // Doing it here and not in the end so we can return the TLV in a simle way
+        if self.pending_receiver_buffer_change > 0 {
+            if self.pending_receiver_buffer_change < self.receiver_buffer_cursor {
+                // There are still some unprocessed bytes
+                self.receiver_buffer.copy_within(
+                    self.pending_receiver_buffer_change..self.receiver_buffer_cursor,
+                    0,
+                );
+                self.receiver_buffer_cursor -= self.pending_receiver_buffer_change;
+            } else {
+                // We are done with this bunch of bytes
+                self.receiver_buffer_cursor = 0;
+            }
+            self.pending_receiver_buffer_change = 0;
+        }
+
+        let start = Instant::now();
+        let mut timeout_remaining = timeout;
+
+        loop {
+            // We try to get some data from the face, if available
+            match self.receiver.recv(
+                &mut self.receiver_buffer[self.receiver_buffer_cursor..],
+                timeout_remaining,
+            ) {
+                Ok(received) => self.receiver_buffer_cursor += received,
+                Err(err) => return Err(BufferedRecvError::FaceError(err)),
+            }
+
+            // Try to parse the TLV in the beginning of the buffer
+            match TLV::try_decode(&self.receiver_buffer[0..self.receiver_buffer_cursor]) {
+                Ok(_) => break,
+                Err(TlvDecodingError::CannotDecodeType {
+                    err: VarintDecodingError::BufferTooShort,
+                }) => {}
+                Err(TlvDecodingError::CannotDecodeLength {
+                    err: VarintDecodingError::BufferTooShort,
+                    ..
+                }) => {}
+                Err(TlvDecodingError::CannotDecodeValue { len, .. }) => {
+                    if len > CAPACITY {
+                        return Err(BufferedRecvError::TlvTooBig(len));
+                    }
+                }
+                Err(err) => return Err(BufferedRecvError::DecodingError(err)),
+            }
+
+            timeout_remaining = if let Some(timeout) = timeout {
+                let elapsed = Instant::now().duration_since(start);
+                if elapsed >= timeout {
+                    return Err(BufferedRecvError::NothingReceived);
+                }
+                Some(timeout - elapsed)
+            } else {
+                None
+            };
+        }
+
+        // We parse twice because otherwise the lifetimes on the buffer are in conflict somehow
+        match TLV::try_decode(&self.receiver_buffer[0..self.receiver_buffer_cursor]) {
+            Ok((tlv, tlv_len)) => {
+                self.pending_receiver_buffer_change += tlv_len;
+                Ok(tlv)
+            }
+            _ => unreachable!(),
+        }
     }
 }

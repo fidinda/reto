@@ -1,3 +1,5 @@
+use core::time::Duration;
+
 pub mod buffered;
 
 pub mod local;
@@ -28,9 +30,15 @@ pub trait FaceSender {
     }
 }
 
-use crate::io::Write;
+pub trait BlockingFaceReceiver {
+    fn recv(&mut self, dst: &mut [u8], timeout: Option<Duration>) -> Result<usize, FaceError>;
+}
 
-impl<FS: FaceSender + ?Sized> Write for FS {
+pub trait BlockingFaceSender {
+    fn send(&mut self, src: &[u8], timeout: Option<Duration>) -> Result<usize, FaceError>;
+}
+
+impl<FS: FaceSender + ?Sized> crate::io::Write for FS {
     type Error = FaceError;
 
     fn write(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {

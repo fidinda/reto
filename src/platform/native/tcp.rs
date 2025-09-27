@@ -1,9 +1,10 @@
+use core::time::Duration;
 use std::{
     io::{Error, ErrorKind, Read, Write},
     net::TcpStream,
 };
 
-use crate::face::{FaceError, FaceReceiver, FaceSender};
+use crate::face::{BlockingFaceReceiver, BlockingFaceSender, FaceError, FaceReceiver, FaceSender};
 use crate::platform::native::notifying::Notifying;
 
 use super::notifying::SocketId;
@@ -66,5 +67,56 @@ pub fn tcp_face(stream: TcpStream) -> Result<(TcpSender, TcpReceiver), Error> {
         stream: stream.try_clone()?,
     };
     let receiver = TcpReceiver { stream };
+    Ok((sender, receiver))
+}
+
+pub struct BlockingTcpSender {
+    stream: TcpStream,
+}
+
+pub struct BlockingTcpReceiver {
+    stream: TcpStream,
+}
+
+impl BlockingFaceSender for BlockingTcpSender {
+    fn send(&mut self, src: &[u8], timeout: Option<Duration>) -> Result<usize, FaceError> {
+        if let Err(_) = self.stream.set_write_timeout(timeout) {
+            return Err(FaceError::Disconnected);
+        }
+        match self.stream.write(src) {
+            Ok(bytes_sent) => Ok(bytes_sent),
+            Err(io_err) => match io_err.kind() {
+                ErrorKind::WouldBlock => Ok(0),
+                ErrorKind::TimedOut => Ok(0),
+                _ => return Err(FaceError::Disconnected),
+            },
+        }
+    }
+}
+
+impl BlockingFaceReceiver for BlockingTcpReceiver {
+    fn recv(&mut self, dst: &mut [u8], timeout: Option<Duration>) -> Result<usize, FaceError> {
+        if let Err(_) = self.stream.set_read_timeout(timeout) {
+            return Err(FaceError::Disconnected);
+        }
+        match self.stream.read(dst) {
+            Ok(bytes_received) => Ok(bytes_received),
+            Err(io_err) => match io_err.kind() {
+                ErrorKind::WouldBlock => Ok(0),
+                ErrorKind::TimedOut => Ok(0),
+                _ => return Err(FaceError::Disconnected),
+            },
+        }
+    }
+}
+
+pub fn blocking_tcp_face(
+    stream: TcpStream,
+) -> Result<(BlockingTcpSender, BlockingTcpReceiver), Error> {
+    stream.set_nonblocking(false)?;
+    let sender = BlockingTcpSender {
+        stream: stream.try_clone()?,
+    };
+    let receiver = BlockingTcpReceiver { stream };
     Ok((sender, receiver))
 }
