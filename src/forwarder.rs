@@ -602,11 +602,13 @@ mod tests {
         let face2 = forwarder.add_face(fs2, fr2).unwrap();
 
         let name_prefix = Name::new();
-        let name_prefix = name_prefix.adding_component(NameComponent::new_generic(b"ndn"));
+        let comp = &[NameComponent::generic(b"ndn")];
+        let name_prefix = name_prefix.adding_components(comp);
 
         forwarder.register_name_prefix_for_forwarding(name_prefix, face2, 0);
 
-        let name = name_prefix.adding_component(NameComponent::new_generic(b"version"));
+        let comp = &[NameComponent::generic(b"version")];
+        let name = name_prefix.adding_components(comp);
         let nonce = [1, 2, 3, 4];
         let interest = Interest::new(name, false, nonce);
 
@@ -619,7 +621,7 @@ mod tests {
 
         loop {
             match face2receiver.try_recv() {
-                Ok(tlv) => {
+                Ok((tlv, _)) => {
                     assert_eq!(tlv.typ.get(), Interest::TLV_TYPE);
                     let received_interest = Interest::try_decode_from_inner(tlv.val).unwrap();
                     assert_eq!(
@@ -657,7 +659,7 @@ mod tests {
 
         loop {
             match face1receiver.try_recv() {
-                Ok(tlv) => {
+                Ok((tlv, _)) => {
                     assert_eq!(tlv.typ.get(), Data::TLV_TYPE);
                     let received_data = Data::try_decode_from_inner(tlv.val).unwrap();
                     assert_eq!(received_data.content.unwrap().bytes, b"v0.3");

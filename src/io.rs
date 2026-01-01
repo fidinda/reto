@@ -15,3 +15,12 @@ pub trait Decode<'a> {
     where
         Self: Sized;
 }
+
+impl Write for Vec<u8> {
+    type Error = ();
+
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
+        self.extend_from_slice(bytes);
+        Ok(())
+    }
+}

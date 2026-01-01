@@ -322,6 +322,11 @@ impl<'a> Data<'a> {
         writer.write(self.unknown_tlvs[2])?;
         self.signature_info.encode(writer)
     }
+
+    pub fn hash_whole_packet<H: Hasher>(&self, hasher: &mut H) {
+        let mut hh = EncodedHasher { hasher };
+        let _ = self.encode(&mut hh);
+    }
 }
 
 impl<'a> TlvEncode for Data<'a> {

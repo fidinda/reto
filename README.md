@@ -12,7 +12,7 @@ At a high level the NDN network works like this:
 - The _network_ routes the interest to another peer that may be able to provide data for this name.
 - A peer who receives the interest may *respond with a __data__* packet that has the name, the payload, and a (typically cryptographic) signature that binds these two together. Note that the data packet is fully self-contained and we are agnostic about the actual place it came from (which, among other things, enables in-network caching).
 
-The network itself is implemented as a collection of interconnected __forwarders__, whcih are responsible for delivering the interest and data to the corresponding parties. The forwarder itself can be rather opaque, the most important part of each forwarder are the __faces__, i.e. the connections to other forwarders. Each face can be used to send or receive interests and data and is conceptually broadcast, event if many actual faces are point-to-point.
+The network itself is implemented as a collection of interconnected __forwarders__, which are responsible for delivering the interest and data to the corresponding parties. The forwarder implementation can be rather opaque, the most important part of each forwarder are the __faces__, i.e. the connections to other forwarders. Each face can be used to send or receive interests and data and is conceptually broadcast, event if many actual faces are point-to-point.
 
 The forwarding then works as follows:
 - An application can be running an embedded simple forwarder or be talking to a remote one via one of the faces. The forwarder does not care if a face belongs to a local application or a remote forwarder, the interfaces are all the same.
@@ -28,11 +28,11 @@ Reto provides a Rust implementation of the following:
 - The type-length-value encoding that is used pervasively in all NDN protocols.
 - The typed zero-allocation implementation of most of the concepts defined in v0.3 specification, particularly of interest and data packets.
 - The traits for faces, as well as the implementations of the most useful ones including TCP/UDP/Socket and in-process channel-like faces.
-- The implementation of a simple single-threaded forwarder useful for embedding within applications. When used in a native application on Unix or Windows there is also a forwarder that exploits non-blocking networking I/O and should be comparable in speed to async without the need for a runtime.
+- The implementation of a simple single-threaded forwarder useful for embedding within applications. When used in a native application on Unix or Windows there is also a forwarder that exploits non-blocking networking I/O and should be comparable in perfrmance to async runtimes without the need for said runtime.
 
 One possibly desirable aspect that is not covered is _routing_, which can roughly be thought of as using some global information about network topology and advertised prefixes to define the forwarding strategy to be used. Since all the routing is ultimately expressed in updating prefixes and costs on the forwarder, it is possible to have any router running together with the forwarder and periodically sending the updates.
 
-Many of the aspects need for the actual applications, such as name space construction, signature verification, encryption, etc, can be built _on top_ of Reto. In this sense NDN is a network layer (c.f. IP) and can support many different transport layers (c.f. TCP).
+Many of the aspects need for the actual applications, such as name space construction, signature verification, encryption, etc, can be built _on top_ of Reto. In this sense NDN is a network layer (like IP) and can support many different transport layers (like TCP).
 
 ## Example
 
@@ -60,7 +60,7 @@ fn main() -> std::io::Result<()> {
 
     let name_prefix = Name::new();
     let name_prefix =
-        name_prefix.adding_component(NameComponent::new_generic(name_prefix_string.as_bytes()));
+        name_prefix.adding_component(NameComponent::generic(name_prefix_string.as_bytes()));
 
     let addr = format!("127.0.0.1:{own_port}");
     let socket = UdpSocket::bind(addr)?;

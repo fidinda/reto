@@ -16,11 +16,11 @@ pub enum BufferedRecvError {
 }
 
 pub trait BufferedFaceReceiver {
-    fn try_recv(&mut self) -> Result<TLV<'_>, BufferedRecvError>;
+    fn try_recv(&mut self) -> Result<(TLV<'_>, &[u8]), BufferedRecvError>;
 }
 
 pub trait BufferedBlockingFaceReceiver {
-    fn recv(&mut self, timeout: Option<Duration>) -> Result<TLV<'_>, BufferedRecvError>;
+    fn recv(&mut self, timeout: Option<Duration>) -> Result<(TLV<'_>, &[u8]), BufferedRecvError>;
 }
 
 pub struct BufferedReceiver<FR: FaceReceiver, const CAPACITY: usize = MAX_PACKET_SIZE> {
@@ -48,7 +48,7 @@ pub fn default_buffered_receiver<FR: FaceReceiver>(receiver: FR) -> BufferedRece
 impl<FR: FaceReceiver, const CAPACITY: usize> BufferedFaceReceiver
     for BufferedReceiver<FR, CAPACITY>
 {
-    fn try_recv(&mut self) -> Result<TLV<'_>, BufferedRecvError> {
+    fn try_recv(&mut self) -> Result<(TLV<'_>, &[u8]), BufferedRecvError> {
         // Reset the cursor back by the size of the last processed element, if any
         // Doing it here and not in the end so we can return the TLV in a simle way
         if self.pending_receiver_buffer_change > 0 {
@@ -100,7 +100,7 @@ impl<FR: FaceReceiver, const CAPACITY: usize> BufferedFaceReceiver
         //  and so will want to remove these bytes before the next iteration
         self.pending_receiver_buffer_change = tlv_len;
 
-        Ok(tlv)
+        Ok((tlv, &self.receiver_buffer[0..tlv_len]))
     }
 }
 
@@ -128,7 +128,7 @@ impl<FR: BlockingFaceReceiver, const CAPACITY: usize> BufferedBlockingReceiver<F
 impl<FR: BlockingFaceReceiver, const CAPACITY: usize> BufferedBlockingFaceReceiver
     for BufferedBlockingReceiver<FR, CAPACITY>
 {
-    fn recv(&mut self, timeout: Option<Duration>) -> Result<TLV<'_>, BufferedRecvError> {
+    fn recv(&mut self, timeout: Option<Duration>) -> Result<(TLV<'_>, &[u8]), BufferedRecvError> {
         // Reset the cursor back by the size of the last processed element, if any
         // Doing it here and not in the end so we can return the TLV in a simle way
         if self.pending_receiver_buffer_change > 0 {
@@ -192,7 +192,7 @@ impl<FR: BlockingFaceReceiver, const CAPACITY: usize> BufferedBlockingFaceReceiv
         match TLV::try_decode(&self.receiver_buffer[0..self.receiver_buffer_cursor]) {
             Ok((tlv, tlv_len)) => {
                 self.pending_receiver_buffer_change += tlv_len;
-                Ok(tlv)
+                Ok((tlv, &self.receiver_buffer[0..tlv_len]))
             }
             _ => unreachable!(),
         }

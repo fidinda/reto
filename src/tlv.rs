@@ -389,14 +389,6 @@ mod tests {
     use crate::tlv::{Decode, Encode, TlvDecodingError, VarintDecodingError, TLV};
     use alloc::vec::Vec;
 
-    impl super::Write for Vec<u8> {
-        type Error = ();
-        fn write(&mut self, bytes: &[u8]) -> Result<(), ()> {
-            self.extend_from_slice(bytes);
-            Ok(())
-        }
-    }
-
     struct SliceBuffer<const N: usize> {
         bytes: [u8; N],
         cursor: usize,

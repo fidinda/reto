@@ -45,7 +45,11 @@ pub struct ReferenceTables {
 }
 
 impl ReferenceTables {
-    pub fn new(data_cache_duration_ms: u32, dead_nonce_duration_ms: u32, prune_interval_ms: u32) -> Self {
+    pub fn new(
+        data_cache_duration_ms: u32,
+        dead_nonce_duration_ms: u32,
+        prune_interval_ms: u32,
+    ) -> Self {
         Self {
             root: TableEntry::new(),
             dead_nonce_list: DeadNonceList::new(dead_nonce_duration_ms as u64),
@@ -75,8 +79,8 @@ impl Tables for ReferenceTables {
 
     fn prune_if_needed(&mut self, now: Timestamp) {
         if self.last_prune_time.adding(self.prune_interval_ms) < now {
-             self.root
-            .prune_if_needed(Name::new(), now, &mut self.dead_nonce_list);
+            self.root
+                .prune_if_needed(Name::new(), now, &mut self.dead_nonce_list);
             self.dead_nonce_list.prune(now);
 
             // TODO: Maybe need to have metrics here? Or return number of removed data/intrests
@@ -392,7 +396,7 @@ impl TableEntry {
             )
         } else {
             // This is the final name component, will work with this node's PIT
-            
+
             if faces.len() == 0 {
                 // There are no valid faces on this path so far so we do not even try to create a PIT
                 return;
@@ -534,7 +538,7 @@ impl TableEntry {
             if self.children.len() > 0 {
                 // Try for full name as well
                 let digest = digest_computation();
-                let component = NameComponent::new_implicit(&digest);
+                let component = NameComponent::implicit_sha256(&digest);
                 let idx = if let Some(child) = self.get_child(component) {
                     child.0.satisfy_interests(
                         name,
@@ -583,7 +587,7 @@ impl TableEntry {
             );
         } else {
             // We get to the implicit digest component
-            let child = self.get_or_insert_child(NameComponent::new_implicit(digest.as_slice()));
+            let child = self.get_or_insert_child(NameComponent::implicit_sha256(digest.as_slice()));
             match child.data.as_mut() {
                 Some(entry) => {
                     debug_assert!(packet == entry.data.as_ref());
@@ -695,7 +699,8 @@ impl TableEntry {
                 typ: cc.0.typ,
                 bytes: &cc.0.bytes,
             };
-            let name_so_far = name_so_far.adding_component(component);
+            let comp = &[component];
+            let name_so_far = name_so_far.adding_components(comp);
             cc.1.prune_if_needed(name_so_far, now, dead_nonce_list);
         }
 

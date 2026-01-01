@@ -28,10 +28,10 @@ fn main() -> std::io::Result<()> {
     let name_prefix_string = std::env::args().nth(4).unwrap();
 
     let name_prefix = Name::new();
-    let name_prefix =
-        name_prefix.adding_component(NameComponent::new_generic(name_prefix_string.as_bytes()));
+    let comp = &[NameComponent::generic(name_prefix_string.as_bytes())];
+    let name_prefix = name_prefix.adding_components(comp);
     //for comp in name_prefix_string.split('/') {
-    //    name_prefix = name_prefix.adding_component(NameComponent::new_generic(comp.as_bytes()))
+    //    name_prefix = name_prefix.adding_component(NameComponent::generic(comp.as_bytes()))
     //}
 
     let addr = format!("127.0.0.1:{own_port}");
@@ -52,7 +52,7 @@ fn main() -> std::io::Result<()> {
 
     loop {
         match face1receiver.try_recv() {
-            Ok(tlv) => {
+            Ok((tlv, _)) => {
                 if tlv.typ.get() == Interest::TLV_TYPE {
                     let interest = Interest::try_decode_from_inner(tlv.val).unwrap();
 

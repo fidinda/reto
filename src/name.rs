@@ -29,21 +29,21 @@ impl<'a> NameComponent<'a> {
         })
     }
 
-    pub fn new_generic(bytes: &'a [u8]) -> Self {
+    pub fn generic(bytes: &'a [u8]) -> Self {
         Self {
             typ: NonZeroU16::new(Self::TYPE_GENERIC).unwrap(),
             bytes,
         }
     }
 
-    pub fn new_implicit(bytes: &'a [u8]) -> Self {
+    pub fn implicit_sha256(bytes: &'a [u8]) -> Self {
         Self {
             typ: NonZeroU16::new(Self::TYPE_IMPLICIT_SHA256).unwrap(),
             bytes,
         }
     }
 
-    pub fn new_parameter(bytes: &'a [u8]) -> Self {
+    pub fn parameter_sha256(bytes: &'a [u8]) -> Self {
         Self {
             typ: NonZeroU16::new(Self::TYPE_PARAMETER_SHA256).unwrap(),
             bytes,
@@ -81,13 +81,29 @@ impl<'a> Name<'a> {
         }
     }
 
+    pub fn with_components(components: &'a [NameComponent<'a>]) -> Self {
+        Name {
+            inner: NameInner::Components {
+                original: &Name {
+                    inner: NameInner::Empty,
+                },
+                components,
+                remaining_count: components.len(),
+            },
+        }
+    }
+
     pub fn component_count(&self) -> usize {
         match self.inner {
             NameInner::Empty => 0,
             NameInner::Buffer {
                 component_count, ..
             } => component_count,
-            NameInner::Component { original, .. } => original.component_count() + 1,
+            NameInner::Components {
+                original,
+                remaining_count,
+                ..
+            } => original.component_count() + remaining_count,
         }
     }
 
@@ -112,15 +128,30 @@ impl<'a> Name<'a> {
                     },
                 })
             }
-            NameInner::Component { original, .. } => Some(*original),
+            NameInner::Components {
+                original,
+                components,
+                remaining_count,
+            } => Some(if remaining_count == 1 {
+                *original
+            } else {
+                Name {
+                    inner: NameInner::Components {
+                        original,
+                        components,
+                        remaining_count: remaining_count - 1,
+                    },
+                }
+            }),
         }
     }
 
-    pub fn adding_component(&'a self, component: NameComponent<'a>) -> Self {
+    pub fn adding_components(&'a self, components: &'a [NameComponent<'a>]) -> Self {
         Name {
-            inner: NameInner::Component {
+            inner: NameInner::Components {
                 original: self,
-                component,
+                components,
+                remaining_count: components.len(),
             },
         }
     }
@@ -160,8 +191,12 @@ impl<'a> Name<'a> {
                 *innermost_count = component_count;
                 *innermost_bytes = Some(&component_bytes);
             }
-            NameInner::Component { original, .. } => {
-                *free_components += 1;
+            NameInner::Components {
+                original,
+                remaining_count,
+                ..
+            } => {
+                *free_components += remaining_count;
                 original.compute_iter(innermost_bytes, innermost_count, free_components)
             }
         }
@@ -196,15 +231,20 @@ impl<'a> TlvEncode for Name<'a> {
                     offset
                 }
             }
-            NameInner::Component {
+            NameInner::Components {
                 original,
-                component,
+                components,
+                remaining_count,
             } => {
-                let tlv = TLV {
-                    typ: component.typ.into(),
-                    val: &component.bytes,
-                };
-                original.inner_length() + tlv.encoded_length()
+                let mut len = original.inner_length();
+                for i in 0..remaining_count {
+                    let tlv = TLV {
+                        typ: components[i].typ.into(),
+                        val: &components[i].bytes,
+                    };
+                    len += tlv.encoded_length()
+                }
+                len
             }
         }
     }
@@ -234,16 +274,20 @@ impl<'a> TlvEncode for Name<'a> {
                     writer.write(&component_bytes[0..offset])
                 }
             }
-            NameInner::Component {
+            NameInner::Components {
                 original,
-                component,
+                components,
+                remaining_count,
             } => {
                 original.encode_inner(writer)?;
-                let tlv = TLV {
-                    typ: component.typ.into(),
-                    val: &component.bytes,
-                };
-                tlv.encode(writer)
+                for i in 0..remaining_count {
+                    let tlv = TLV {
+                        typ: components[i].typ.into(),
+                        val: &components[i].bytes,
+                    };
+                    tlv.encode(writer)?;
+                }
+                Ok(())
             }
         }
     }
@@ -286,9 +330,10 @@ enum NameInner<'a> {
         component_count: usize,
         original_count: usize,
     },
-    Component {
+    Components {
         original: &'a Name<'a>,
-        component: NameComponent<'a>,
+        components: &'a [NameComponent<'a>],
+        remaining_count: usize,
     },
 }
 
@@ -303,6 +348,9 @@ impl<'a> Iterator for NameComponentIterator<'a> {
     type Item = NameComponent<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // We first go to the original inner name which we know is
+        //  at the core (if present at all), and then pick off added
+        //  components one by one.
         if self.innermost_remaining == 0 {
             if self.free_components == 0 {
                 return None;
@@ -326,21 +374,29 @@ impl<'a> Iterator for NameComponentIterator<'a> {
                 }
             }
             None => {
-                let mut depth = 0;
                 let mut nn = &self.name;
-                let mut cc = None;
-                while depth < self.free_components {
-                    depth += 1;
-                    (nn, cc) = match nn.inner {
-                        NameInner::Component {
+                let mut remaining_free_components = self.free_components;
+                loop {
+                    match nn.inner {
+                        NameInner::Components {
                             original,
-                            component,
-                        } => (original, Some(component)),
+                            components,
+                            remaining_count,
+                        } => {
+                            if remaining_free_components > remaining_count {
+                                // The sought component is in a deeper chunk
+                                nn = original;
+                                remaining_free_components -= remaining_count;
+                            } else {
+                                self.free_components -= 1;
+                                return Some(
+                                    components[remaining_count - remaining_free_components],
+                                );
+                            }
+                        }
                         _ => unreachable!(), // Because upon iterator creation we ensured the correct depth
-                    };
+                    }
                 }
-                self.free_components -= 1;
-                cc
             }
         }
     }
@@ -356,15 +412,15 @@ mod tests {
 
     #[test]
     fn test_component() {
-        let comp = NameComponent::new_generic(b"Hello");
+        let comp = NameComponent::generic(b"Hello");
         assert!(comp.typ.get() == NameComponent::TYPE_GENERIC);
         assert!(comp.bytes == b"Hello");
 
-        let comp = NameComponent::new_implicit(b"");
+        let comp = NameComponent::implicit_sha256(b"");
         assert!(comp.typ.get() == NameComponent::TYPE_IMPLICIT_SHA256);
         assert!(comp.bytes == b"");
 
-        let comp = NameComponent::new_parameter(b"parpar");
+        let comp = NameComponent::parameter_sha256(b"parpar");
         assert!(comp.typ.get() == NameComponent::TYPE_PARAMETER_SHA256);
         assert!(comp.bytes == b"parpar");
 
@@ -384,7 +440,8 @@ mod tests {
         assert_eq!(name.component_count(), 0);
         assert!(name.components().next().is_none());
 
-        let name = name.adding_component(NameComponent::new_generic(b"Hello"));
+        let comp = &[NameComponent::generic(b"Hello")];
+        let name = name.adding_components(comp);
         assert_eq!(name.component_count(), 1);
         let mut nc = name.components();
         let comp = nc.next();
@@ -394,7 +451,8 @@ mod tests {
         assert!(comp.bytes == b"Hello");
         assert!(nc.next().is_none());
 
-        let name = name.adding_component(NameComponent::new_implicit(b"CAFECAFE"));
+        let comp = &[NameComponent::implicit_sha256(b"CAFECAFE")];
+        let name = name.adding_components(comp);
         assert_eq!(name.component_count(), 2);
         let mut nc = name.components();
         let comp = nc.next();
@@ -493,7 +551,8 @@ mod tests {
         assert!(comp.bytes == b"world");
         assert!(nc.next().is_none());
 
-        let name = name.adding_component(NameComponent::new_parameter(b"CAFECAFE"));
+        let comp = &[NameComponent::parameter_sha256(b"CAFECAFE")];
+        let name = name.adding_components(comp);
         assert_eq!(name.component_count(), 3);
         let mut nc = name.components();
         let comp = nc.next();
@@ -542,7 +601,8 @@ mod tests {
         assert!(comp.bytes == b"hello");
         assert!(nc.next().is_none());
 
-        let name = name.adding_component(NameComponent::new_parameter(b"CAFECAFE"));
+        let comp = &[NameComponent::parameter_sha256(b"CAFECAFE")];
+        let name = name.adding_components(comp);
         assert_eq!(name.component_count(), 2);
         let mut nc = name.components();
         let comp = nc.next();
@@ -613,6 +673,88 @@ mod tests {
         assert!(name.is_none());
     }
 
+    #[test]
+    fn test_iteration() {
+        let inner_bytes = &[
+            8, 5, b'h', b'e', b'l', b'l', b'o', 1, 5, b'w', b'o', b'r', b'l', b'd',
+        ];
+
+        let name = Name::try_decode_from_inner(inner_bytes);
+        assert!(name.is_some());
+        let name = name.unwrap();
+        assert!(name.component_count() == 2);
+
+        let comp = &[NameComponent::generic(b"a1")];
+        let name = name.adding_components(comp);
+        assert_eq!(name.component_count(), 3);
+
+        for (ii, cc) in name.components().enumerate() {
+            match ii {
+                0 => assert!(cc.bytes == b"hello"),
+                1 => assert!(cc.bytes == b"world"),
+                2 => assert!(cc.bytes == b"a1"),
+                _ => panic!(),
+            }
+        }
+
+        let comp = &[
+            NameComponent::generic(b"b1"),
+            NameComponent::generic(b"b2"),
+            NameComponent::generic(b"b3"),
+        ];
+        let name = name.adding_components(comp);
+        assert_eq!(name.component_count(), 6);
+
+        for (ii, cc) in name.components().enumerate() {
+            match ii {
+                0 => assert!(cc.bytes == b"hello"),
+                1 => assert!(cc.bytes == b"world"),
+                2 => assert!(cc.bytes == b"a1"),
+
+                3 => assert!(cc.bytes == b"b1"),
+                4 => assert!(cc.bytes == b"b2"),
+                5 => assert!(cc.bytes == b"b3"),
+                _ => panic!(),
+            }
+        }
+
+        let name = name.dropping_last_component();
+        assert!(name.is_some());
+        let name = name.unwrap();
+        assert_eq!(name.component_count(), 5);
+
+        for (ii, cc) in name.components().enumerate() {
+            match ii {
+                0 => assert!(cc.bytes == b"hello"),
+                1 => assert!(cc.bytes == b"world"),
+                2 => assert!(cc.bytes == b"a1"),
+
+                3 => assert!(cc.bytes == b"b1"),
+                4 => assert!(cc.bytes == b"b2"),
+                _ => panic!(),
+            }
+        }
+
+        let comp = &[NameComponent::generic(b"c1"), NameComponent::generic(b"c2")];
+        let name = name.adding_components(comp);
+        assert_eq!(name.component_count(), 7);
+
+        for (ii, cc) in name.components().enumerate() {
+            match ii {
+                0 => assert!(cc.bytes == b"hello"),
+                1 => assert!(cc.bytes == b"world"),
+                2 => assert!(cc.bytes == b"a1"),
+
+                3 => assert!(cc.bytes == b"b1"),
+                4 => assert!(cc.bytes == b"b2"),
+
+                5 => assert!(cc.bytes == b"c1"),
+                6 => assert!(cc.bytes == b"c2"),
+                _ => panic!(),
+            }
+        }
+    }
+
     use alloc::vec::Vec;
 
     #[test]
@@ -649,7 +791,8 @@ mod tests {
             7, 24, 8, 5, b'h', b'e', b'l', b'l', b'o', 1, 5, b'w', b'o', b'r', b'l', b'd', 2, 8,
             b'C', b'A', b'F', b'E', b'C', b'A', b'F', b'E',
         ];
-        let name = name.adding_component(NameComponent::new_parameter(b"CAFECAFE"));
+        let comp = &[NameComponent::parameter_sha256(b"CAFECAFE")];
+        let name = name.adding_components(comp);
 
         let mut buf = Vec::new();
         assert!(name.encoded_length() == outer_bytes.len());
